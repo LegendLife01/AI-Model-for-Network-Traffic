@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("synthetic", "simulate", "live", "deploy", "destroy", "train", "visualize")]
+    [ValidateSet("synthetic", "kaggle", "simulate", "live", "deploy", "destroy", "train", "visualize")]
     [string]$Mode = "synthetic",
     [int]$Samples = 720,
     [int]$Interval = 1,
@@ -101,7 +101,22 @@ function Invoke-ModelPipeline($Python, $InputCsv, $OutputDir) {
     Pop-Location
 }
 
-$NeedsPython = $Mode -in @("synthetic", "simulate", "live", "train", "visualize")
+function Invoke-KaggleTelemetry($Python, $OutputCsv, $Rows) {
+    Push-Location $MlDir
+    & $Python load_kaggle_data.py --rows $Rows --output $OutputCsv
+    $windowsExit = $LASTEXITCODE
+    Pop-Location
+    if ($windowsExit -eq 0) {
+        return
+    }
+
+    Log-Step "Windows Kaggle load failed; trying WSL virtual environment"
+    $wslProject = ConvertTo-WslPath $ProjectDir
+    $wslOutputCsv = ConvertTo-WslPath $OutputCsv
+    Invoke-WslBash "cd '$wslProject' && if [ ! -x .venv-kaggle/bin/python ]; then python3 -m venv .venv-kaggle; fi && .venv-kaggle/bin/python -c 'import kagglehub' 2>/dev/null || .venv-kaggle/bin/python -m pip install 'kagglehub[pandas-datasets]' && .venv-kaggle/bin/python ml/load_kaggle_data.py --rows $Rows --output '$wslOutputCsv'"
+}
+
+$NeedsPython = $Mode -in @("synthetic", "kaggle", "simulate", "live", "train", "visualize")
 if ($NeedsPython) {
     $Python = Get-PythonCommand
     if (-not $SkipInstall) {
@@ -117,6 +132,13 @@ switch ($Mode) {
         Push-Location $MlDir
         & $Python generate_data.py --hours $Samples --output $DataFile --seed 7
         Pop-Location
+        Invoke-ModelPipeline $Python $DataFile $RunDir
+    }
+
+    "kaggle" {
+        New-Item -ItemType Directory -Path $RunDir -Force | Out-Null
+        Log-Step "Loading Kaggle network telemetry"
+        Invoke-KaggleTelemetry $Python $DataFile $Samples
         Invoke-ModelPipeline $Python $DataFile $RunDir
     }
 

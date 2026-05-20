@@ -122,7 +122,8 @@ def main() -> None:
     style_axis(ax_loss, "Training Loss")
 
     ax_corr = fig.add_subplot(gs[2, 1])
-    corr = np.corrcoef(df[FEATURES].tail(len(actuals)).to_numpy().T)
+    corr = df[FEATURES].tail(len(actuals)).corr().fillna(0.0).to_numpy().copy()
+    np.fill_diagonal(corr, 1.0)
     im = ax_corr.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1)
     names = ["Traffic", "Latency", "Loss"]
     ax_corr.set_xticks(range(3), names, color=muted)

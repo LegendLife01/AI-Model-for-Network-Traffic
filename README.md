@@ -40,6 +40,16 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\run.ps1 synthetic -Samples 720 -Epochs 120
 ```
 
+To train from the Kaggle `crawford/computer-network-traffic` dataset:
+
+```powershell
+.\run.ps1 kaggle -Samples 720 -Epochs 120
+```
+
+Each Kaggle run creates a new `runs/<timestamp>_kaggle/` folder and randomizes
+the selected workstation profile, scaling, jitter, and bursts so repeated runs
+produce different network telemetry numbers.
+
 Every run creates its own folder under `runs/`, for example
 `runs/20260519_154500_synthetic/`. The folder contains that run's
 `telemetry.csv`, model weights, CSV artifacts, metrics, spike summary, and
