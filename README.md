@@ -13,6 +13,17 @@ traffic, latency, and packet-loss data from deployed ContainerLab nodes.
 - Multivariate LSTM that predicts traffic, latency, and packet loss together.
 - Dashboard with forecasts, errors, correlations, and spike detection.
 
+## Training Defaults
+
+- Lookback sequence length: `48`
+- Hidden size: `128`
+- LSTM layers: `2`
+- Epochs: `130`
+- Packet loss transform: `log1p` during training, `expm1` after prediction
+- Spike-weighted loss: training quantile `0.90`, spike weight `4.0`
+- Early stopping: off by default so training runs through all requested epochs
+- Dataset optimized trainer: early-stopped Gradient Boosting, no spike oversampling by default
+
 ## Project Layout
 
 ```text
@@ -30,50 +41,81 @@ ai_network_project/
 ## Quick Start Without ContainerLab
 
 ```bash
-bash run.sh synthetic --samples 720 --epochs 120
+bash run.sh synthetic --samples 720 --epochs 130
 ```
 
 On Windows PowerShell, use the native runner instead:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\run.ps1 synthetic -Samples 720 -Epochs 120
+.\run.ps1 synthetic -Samples 720 -Epochs 130
 ```
 
 To train from the Kaggle `crawford/computer-network-traffic` dataset:
 
 ```powershell
-.\run.ps1 kaggle -Samples 720 -Epochs 120
+.\run.ps1 kaggle -Samples 720 -Epochs 130
 ```
 
-Each Kaggle run creates a new `runs/<timestamp>_kaggle/` folder and randomizes
-the selected workstation profile, scaling, jitter, and bursts so repeated runs
-produce different network telemetry numbers.
+For best spike prediction on dataset-style telemetry, use the optimized dataset
+trainer:
+
+```powershell
+.\run.ps1 kaggle_opt -Samples 5000 -SkipInstall
+```
+
+For any other telemetry dataset, save it as `ml/telemetry.csv` with columns
+`timestamp`, `traffic_mbps`, `latency_ms`, and `packet_loss_pct`, then run:
+
+```powershell
+.\run.ps1 dataset_opt -SkipInstall
+```
+
+Each Kaggle run creates a new `runs/<timestamp>_kaggle/` folder and preserves
+chronological order for valid time-series training. If no seed is supplied, the
+loader can choose a different chronological slice each run. Optional
+augmentation is available in `ml/load_kaggle_data.py`.
 
 Every run creates its own folder under `runs/`, for example
 `runs/20260519_154500_synthetic/`. The folder contains that run's
-`telemetry.csv`, model weights, CSV artifacts, metrics, spike summary, and
-dashboard image.
+raw telemetry, model artifacts, CSV results, metrics, spike summary, and
+dashboard images.
 
 To train from an existing `ml/telemetry.csv` and store the result in a new
 run folder:
 
 ```powershell
-.\run.ps1 train -Epochs 120
+.\run.ps1 train -Epochs 130
 .\run.ps1 visualize
 ```
 
-Outputs are written to each run folder:
+Outputs are written to subfolders inside each run folder:
 
-- `telemetry.csv`
-- `lstm_model.pth`
-- `scaler_params.json`
-- `predictions.csv`
-- `actuals.csv`
-- `train_losses.csv`
-- `metrics.json`
-- `spike_summary.json`
-- `traffic_prediction_dashboard.png`
+- `raw_data/telemetry.csv`
+- `results/predictions.csv`
+- `results/actuals.csv`
+- `results/train_losses.csv`
+- `results/evaluation_comparison.csv`
+- `results/evaluation_baselines.csv`
+- `results/evaluation_spikes.csv`
+- `json/metrics.json`
+- `json/spike_summary.json`
+- `json/scaler_params.json`
+- `json/evaluation_summary.json`
+- `json/model_metadata.json`
+- `json/model_readable_summary.json`
+- `images/traffic_prediction_dashboard.png`
+- `images/model_evaluation_dashboard.png`
+- `model/lstm_model.pth`
+- `model/dataset_model.joblib` for optimized dataset runs
+- `model/model_readable_report.md`
+- `model/model_weights_summary.csv`
+- `model/model_gate_summary.csv`
+
+`model/lstm_model.pth` and `model/dataset_model.joblib` are binary model files.
+They will look unreadable in a text editor by design. Use
+`model_readable_report.md`, `model_readable_summary.json`, `model_metadata.json`,
+`metrics.json`, and the CSV files for human-readable inspection.
 
 ## Install Tools From Terminal
 
@@ -109,7 +151,7 @@ ContainerLab deploy/destroy steps and then run the ML pipeline locally:
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\run.ps1 deploy
-.\run.ps1 live -Samples 120 -Interval 10 -Epochs 120
+.\run.ps1 live -Samples 120 -Interval 10 -Epochs 130
 .\run.ps1 destroy
 ```
 
@@ -130,7 +172,7 @@ folder, trains the LSTM, and creates the dashboard in that same folder.
 
 ```bash
 bash run.sh deploy
-bash run.sh live --samples 120 --interval 10 --epochs 120
+bash run.sh live --samples 120 --interval 10 --epochs 130
 bash run.sh destroy
 ```
 
@@ -148,9 +190,9 @@ The live collector:
 python -m pip install -r requirements.txt
 
 cd ml
-python generate_data.py --hours 720 --seed 7 --output ../runs/manual/telemetry.csv
-python train_model.py --data ../runs/manual/telemetry.csv --epochs 120 --output-dir ../runs/manual
-python visualize.py --data ../runs/manual/telemetry.csv --output-dir ../runs/manual
+python generate_data.py --hours 720 --seed 7 --output ../runs/manual/raw_data/telemetry.csv
+python train_model.py --data ../runs/manual/raw_data/telemetry.csv --epochs 130 --output-dir ../runs/manual
+python visualize.py --data ../runs/manual/raw_data/telemetry.csv --output-dir ../runs/manual
 ```
 
 For live collection after deploying ContainerLab:
@@ -164,5 +206,6 @@ python scripts/collect_telemetry.py --mode live --samples 120 --interval 10 --ou
 - The collector is intentionally host-run because the host has Docker access.
 - Synthetic mode is still useful for demos, model iteration, and environments
   without ContainerLab.
-- Spike thresholds are calculated as `mean + sensitivity * std` and can be
-  changed with `python visualize.py --sensitivity 2.5`.
+- Dashboard spike thresholds are calculated from the training portion as
+  `mean + sensitivity * std` and can be changed with
+  `python visualize.py --sensitivity 2.5`.

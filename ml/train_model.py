@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import shutil
 from pathlib import Path
@@ -13,6 +14,8 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import MinMaxScaler
+
+from run_layout import artifact_path, ensure_run_layout
 
 
 FEATURES = ["traffic_mbps", "latency_ms", "packet_loss_pct"]
@@ -42,14 +45,17 @@ class MultivariateTrafficLSTM(nn.Module):
 
 
 class SpikeWeightedLoss(nn.Module):
-    def __init__(self, threshold: float = 0.7, weight: float = 3.0):
+    def __init__(self, thresholds: torch.Tensor, spike_weight: float = 4.0, focal_gamma: float = 0.0):
         super().__init__()
-        self.threshold = threshold
-        self.weight = weight
+        self.register_buffer("thresholds", thresholds)
+        self.spike_weight = spike_weight
+        self.focal_gamma = focal_gamma
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        weights = 1.0 + self.weight * (target > self.threshold).float()
-        return (weights * (pred - target) ** 2).mean()
+        error = (pred - target).abs()
+        focal = 1.0 if self.focal_gamma <= 0 else 1.0 + error.pow(self.focal_gamma)
+        spike_weights = 1.0 + self.spike_weight * (target > self.thresholds).float()
+        return (spike_weights * focal * (pred - target) ** 2).mean()
 
 
 def create_sequences(data: np.ndarray, seq_len: int) -> tuple[np.ndarray, np.ndarray]:
@@ -68,20 +74,42 @@ def load_dataset(path: Path) -> pd.DataFrame:
     if missing:
         raise ValueError(f"{path} is missing required columns: {', '.join(missing)}")
     df = df.dropna(subset=FEATURES).copy()
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     if len(df) < 30:
         raise ValueError(f"{path} has only {len(df)} usable rows; collect or generate more telemetry.")
     return df
+
+
+def transform_features(df: pd.DataFrame) -> pd.DataFrame:
+    transformed = df.copy()
+    transformed["packet_loss_pct"] = np.log1p(transformed["packet_loss_pct"])
+    return transformed
+
+
+def inverse_transform_features(values: np.ndarray) -> np.ndarray:
+    restored = values.copy()
+    loss_idx = FEATURES.index("packet_loss_pct")
+    restored[:, loss_idx] = np.expm1(restored[:, loss_idx])
+    restored[:, loss_idx] = np.clip(restored[:, loss_idx], 0.0, None)
+    return restored
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", default="telemetry.csv", help="Input telemetry CSV.")
     parser.add_argument("--sequence-length", type=int, default=48, help="Lookback window size.")
-    parser.add_argument("--epochs", type=int, default=120, help="Training epochs.")
-    parser.add_argument("--hidden-size", type=int, default=256, help="LSTM hidden units.")
+    parser.add_argument("--epochs", type=int, default=130, help="Training epochs.")
+    parser.add_argument("--hidden-size", type=int, default=128, help="LSTM hidden units.")
     parser.add_argument("--layers", type=int, default=2, help="LSTM layer count.")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate.")
     parser.add_argument("--train-split", type=float, default=0.8, help="Chronological train split.")
+    parser.add_argument("--spike-quantile", type=float, default=0.9, help="Training quantile used for spike weighting.")
+    parser.add_argument("--spike-weight", type=float, default=4.0, help="Extra loss weight for spike targets.")
+    parser.add_argument("--focal-gamma", type=float, default=0.0, help="Error focus exponent for hard examples.")
+    parser.add_argument("--early-stop-patience", type=int, default=0, help="Stop when validation MSE stops improving. Use 0 to always run all epochs.")
+    parser.add_argument("--early-stop-delta", type=float, default=1e-5, help="Minimum validation MSE improvement.")
     parser.add_argument("--seed", type=int, default=7, help="Torch and NumPy seed.")
     parser.add_argument("--output", default=DEFAULT_MODEL, help="Model weights path.")
     parser.add_argument("--output-dir", default=".", help="Directory for all training artifacts.")
@@ -95,13 +123,14 @@ def main() -> None:
 
     data_path = Path(args.data)
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_run_layout(output_dir)
     model_path = Path(args.output)
     if not model_path.is_absolute():
-        model_path = output_dir / model_path
+        model_path = artifact_path(output_dir, model_path.name, "model")
 
     df = load_dataset(data_path)
-    raw = df[FEATURES].to_numpy(dtype=np.float32)
+    transformed_df = transform_features(df)
+    raw = transformed_df[FEATURES].to_numpy(dtype=np.float32)
     print(f"Loaded {len(raw)} rows from {data_path}")
     for idx, feature in enumerate(FEATURES):
         print(f"  {feature:<16} {raw[:, idx].min():8.3f} to {raw[:, idx].max():8.3f}")
@@ -120,10 +149,15 @@ def main() -> None:
     print(f"Training samples: {len(x_train)} | Test samples: {len(x_test)}")
 
     model = MultivariateTrafficLSTM(len(FEATURES), args.hidden_size, args.layers, len(FEATURES))
-    criterion = SpikeWeightedLoss()
+    spike_thresholds = torch.quantile(y_train, args.spike_quantile, dim=0)
+    criterion = SpikeWeightedLoss(spike_thresholds, args.spike_weight, args.focal_gamma)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=8, factor=0.5)
-    train_losses: list[float] = []
+    train_rows: list[dict[str, float]] = []
+    best_val_mse = float("inf")
+    best_epoch = 0
+    best_state = copy.deepcopy(model.state_dict())
+    stale_epochs = 0
 
     print("Training multivariate LSTM...")
     for epoch in range(args.epochs):
@@ -131,31 +165,71 @@ def main() -> None:
         optimizer.zero_grad()
         output = model(x_train)
         loss = criterion(output, y_train)
+        train_mse = torch.mean((output - y_train) ** 2)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
-        scheduler.step(float(loss.item()))
-        train_losses.append(float(loss.item()))
+        model.eval()
+        with torch.no_grad():
+            val_output = model(x_test)
+            val_loss = criterion(val_output, y_test)
+            val_mse = torch.mean((val_output - y_test) ** 2)
+        scheduler.step(float(val_loss.item()))
+        train_rows.append(
+            {
+                "epoch": epoch + 1,
+                "mse_loss": float(train_mse.item()),
+                "weighted_loss": float(loss.item()),
+                "validation_mse_loss": float(val_mse.item()),
+                "learning_rate": float(optimizer.param_groups[0]["lr"]),
+            }
+        )
+        if float(val_mse.item()) < best_val_mse - args.early_stop_delta:
+            best_val_mse = float(val_mse.item())
+            best_epoch = epoch + 1
+            best_state = copy.deepcopy(model.state_dict())
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
         if (epoch + 1) % 10 == 0 or epoch == 0:
             lr = optimizer.param_groups[0]["lr"]
-            print(f"  epoch {epoch + 1:3d}/{args.epochs} | loss={loss.item():.6f} | lr={lr:.5f}")
+            print(
+                f"  epoch {epoch + 1:3d}/{args.epochs} | "
+                f"mse={train_mse.item():.6f} | weighted={loss.item():.6f} | "
+                f"val_mse={val_mse.item():.6f} | lr={lr:.5f}"
+            )
+        if args.early_stop_patience > 0 and stale_epochs >= args.early_stop_patience:
+            print(f"  early stopping at epoch {epoch + 1}; best validation MSE was epoch {best_epoch}")
+            break
 
+    model.load_state_dict(best_state)
     model.eval()
     with torch.no_grad():
         pred_scaled = model(x_test).numpy()
         actual_scaled = y_test.numpy()
 
-    predictions = scaler.inverse_transform(pred_scaled)
-    actuals = scaler.inverse_transform(actual_scaled)
+    predictions = inverse_transform_features(scaler.inverse_transform(pred_scaled))
+    actuals = inverse_transform_features(scaler.inverse_transform(actual_scaled))
 
     metrics = {
         "training": {
             "loss": "SpikeWeightedLoss",
-            "spike_threshold_scaled": 0.7,
-            "spike_weight": 3.0,
+            "spike_quantile": args.spike_quantile,
+            "spike_threshold_scaled": spike_thresholds.tolist(),
+            "spike_weight": args.spike_weight,
+            "focal_gamma": args.focal_gamma,
+            "packet_loss_transform": "log1p",
+            "packet_loss_inverse_transform": "expm1",
             "sequence_length": args.sequence_length,
             "hidden_size": args.hidden_size,
-            "epochs": args.epochs,
+            "layers": args.layers,
+            "learning_rate": args.lr,
+            "requested_epochs": args.epochs,
+            "epochs": len(train_rows),
+            "best_epoch": best_epoch,
+            "best_validation_mse_loss": best_val_mse,
+            "early_stop_patience": args.early_stop_patience,
+            "train_split": args.train_split,
         }
     }
     print("\nTest performance:")
@@ -175,16 +249,17 @@ def main() -> None:
         "scale": scaler.scale_.tolist(),
         "min": scaler.min_.tolist(),
     }
-    (output_dir / "scaler_params.json").write_text(json.dumps(scaler_params, indent=2), encoding="utf-8")
-    pd.DataFrame(predictions, columns=FEATURES).to_csv(output_dir / "predictions.csv", index=False)
-    pd.DataFrame(actuals, columns=FEATURES).to_csv(output_dir / "actuals.csv", index=False)
-    pd.DataFrame({"epoch": np.arange(1, len(train_losses) + 1), "mse_loss": train_losses}).to_csv(
-        output_dir / "train_losses.csv",
+    artifact_path(output_dir, "scaler_params.json", "json").write_text(json.dumps(scaler_params, indent=2), encoding="utf-8")
+    pd.DataFrame(predictions, columns=FEATURES).to_csv(artifact_path(output_dir, "predictions.csv", "results"), index=False)
+    pd.DataFrame(actuals, columns=FEATURES).to_csv(artifact_path(output_dir, "actuals.csv", "results"), index=False)
+    pd.DataFrame(train_rows).to_csv(
+        artifact_path(output_dir, "train_losses.csv", "results"),
         index=False,
     )
-    (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-    if data_path.resolve() != (output_dir / data_path.name).resolve():
-        shutil.copy2(data_path, output_dir / data_path.name)
+    artifact_path(output_dir, "metrics.json", "json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    raw_copy = artifact_path(output_dir, data_path.name, "raw_data")
+    if data_path.resolve() != raw_copy.resolve():
+        shutil.copy2(data_path, raw_copy)
 
     print(f"\nSaved model -> {model_path}")
     print(f"Saved human-readable data artifacts -> {output_dir}")

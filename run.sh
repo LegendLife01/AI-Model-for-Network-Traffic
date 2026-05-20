@@ -7,7 +7,7 @@ ML_DIR="$PROJECT_DIR/ml"
 MODE="synthetic"
 SAMPLES=72
 INTERVAL=5
-EPOCHS=120
+EPOCHS=130
 SKIP_INSTALL=0
 
 usage() {
@@ -26,7 +26,7 @@ Modes:
 Options:
   --samples N        Live sample count, or synthetic hours (default: 72)
   --interval SEC     Seconds between live samples (default: 5)
-  --epochs N         Training epochs (default: 120)
+  --epochs N         Training epochs (default: 130)
   --skip-install     Do not install Python dependencies
 EOF
 }
@@ -51,7 +51,7 @@ done
 
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="$PROJECT_DIR/runs/${RUN_STAMP}_${MODE}"
-DATA_FILE="$RUN_DIR/telemetry.csv"
+DATA_FILE="$RUN_DIR/raw_data/telemetry.csv"
 
 install_deps() {
   if [[ "$SKIP_INSTALL" -eq 1 ]]; then
@@ -67,16 +67,23 @@ run_ml() {
   cd "$ML_DIR"
   python train_model.py --data "$DATA_FILE" --epochs "$EPOCHS" --output-dir "$RUN_DIR"
   log "Building dashboard"
-  python visualize.py --data "$DATA_FILE" --output-dir "$RUN_DIR"
+  python visualize.py --data "$RUN_DIR/raw_data/telemetry.csv" --output-dir "$RUN_DIR"
+  log "Evaluating model"
+  python evaluate_model.py --run-dir "$RUN_DIR"
+  log "Exporting readable model report"
+  python export_model_report.py --run-dir "$RUN_DIR"
+  log "Cleaning empty run folders"
+  cd "$PROJECT_DIR"
+  python scripts/cleanup_runs.py
   log "Done"
-  printf 'Run folder:\n  %s\nArtifacts:\n  %s\n  %s\n  %s\n' \
-    "$RUN_DIR" "$DATA_FILE" "$RUN_DIR/lstm_model.pth" "$RUN_DIR/traffic_prediction_dashboard.png"
+  printf 'Run folder:\n  %s\nArtifacts:\n  %s\n  %s\n  %s\n  %s\n  %s\nBinary model weights:\n  %s\n' \
+    "$RUN_DIR" "$RUN_DIR/raw_data/telemetry.csv" "$RUN_DIR/images/traffic_prediction_dashboard.png" "$RUN_DIR/images/model_evaluation_dashboard.png" "$RUN_DIR/json/model_metadata.json" "$RUN_DIR/model/model_readable_report.md" "$RUN_DIR/model/lstm_model.pth"
 }
 
 case "$MODE" in
   synthetic)
     install_deps
-    mkdir -p "$RUN_DIR"
+    mkdir -p "$RUN_DIR/raw_data"
     log "Generating synthetic telemetry"
     cd "$ML_DIR"
     python generate_data.py --hours "$SAMPLES" --output "$DATA_FILE" --seed 7
@@ -84,7 +91,7 @@ case "$MODE" in
     ;;
   live)
     install_deps
-    mkdir -p "$RUN_DIR"
+    mkdir -p "$RUN_DIR/raw_data"
     log "Collecting live ContainerLab telemetry"
     cd "$PROJECT_DIR"
     python scripts/collect_telemetry.py --mode live --samples "$SAMPLES" --interval "$INTERVAL" --output "$DATA_FILE"

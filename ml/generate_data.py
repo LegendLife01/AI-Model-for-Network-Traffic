@@ -42,17 +42,24 @@ def generate_traffic_data(
 
     incident_count = max(4, hours // 36)
     incident_idx = rng.choice(hours, size=min(incident_count, hours), replace=False)
+    latency_incident_idx = rng.choice(hours, size=min(max(2, hours // 96), hours), replace=False)
+    loss_incident_idx = rng.choice(hours, size=min(max(2, hours // 104), hours), replace=False)
     traffic[incident_idx] += rng.uniform(55, 125, len(incident_idx))
 
     load = traffic / 150.0
-    latency = 2.0 + load * 8.5 + rng.normal(0, 0.35, hours)
-    latency[incident_idx] += rng.uniform(5, 22, len(incident_idx))
+    queueing_pressure = np.maximum(load - 0.55, 0.0) ** 2
+    latency = 2.0 + load * 4.8 + queueing_pressure * 18.0 + rng.normal(0, 0.55, hours)
+    latency[incident_idx] += rng.uniform(2, 10, len(incident_idx))
+    latency[latency_incident_idx] += rng.uniform(3, 10, len(latency_incident_idx))
     latency = np.clip(latency, 0.5, None)
 
-    packet_loss = np.clip(rng.normal(0.08, 0.04, hours), 0, None)
+    packet_loss = np.clip(rng.normal(0.07, 0.06, hours), 0, None)
     high_load = traffic > 90
-    packet_loss[high_load] += rng.uniform(0.25, 2.4, high_load.sum())
-    packet_loss[incident_idx] += rng.uniform(0.9, 7.5, len(incident_idx))
+    packet_loss[high_load] += rng.uniform(0.15, 1.8, high_load.sum())
+    packet_loss[incident_idx] += rng.uniform(0.4, 4.5, len(incident_idx))
+    packet_loss[loss_incident_idx] += rng.uniform(0.5, 4.0, len(loss_incident_idx))
+    random_microbursts = rng.random(hours) < 0.012
+    packet_loss[random_microbursts] += rng.uniform(0.15, 1.8, random_microbursts.sum())
     packet_loss = np.clip(packet_loss, 0.0, 100.0)
 
     df = pd.DataFrame(

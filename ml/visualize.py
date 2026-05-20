@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from run_layout import artifact_path, ensure_run_layout, find_artifact
+
 
 FEATURES = ["traffic_mbps", "latency_ms", "packet_loss_pct"]
 LABELS = ["Traffic (Mbps)", "Latency (ms)", "Packet Loss (%)"]
@@ -48,20 +50,21 @@ def style_axis(ax, title: str) -> None:
 def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_run_layout(output_dir)
 
-    def in_output_dir(path_value: str) -> Path:
+    def result_artifact(path_value: str) -> Path:
         path = Path(path_value)
-        return path if path.is_absolute() else output_dir / path
+        return path if path.is_absolute() else find_artifact(output_dir, path.name, "results")
 
-    predictions = pd.read_csv(in_output_dir(args.predictions))[FEATURES].to_numpy()
-    actuals = pd.read_csv(in_output_dir(args.actuals))[FEATURES].to_numpy()
-    losses_df = pd.read_csv(in_output_dir(args.losses))
+    predictions = pd.read_csv(result_artifact(args.predictions))[FEATURES].to_numpy()
+    actuals = pd.read_csv(result_artifact(args.actuals))[FEATURES].to_numpy()
+    losses_df = pd.read_csv(result_artifact(args.losses))
     losses = losses_df["mse_loss"].to_numpy()
     df = pd.read_csv(args.data).dropna(subset=FEATURES)
 
+    train_rows = max(1, len(df) - len(actuals))
     thresholds = {
-        feature: float(df[feature].mean() + args.sensitivity * df[feature].std(ddof=0))
+        feature: float(df[feature].iloc[:train_rows].mean() + args.sensitivity * df[feature].iloc[:train_rows].std(ddof=0))
         for feature in FEATURES
     }
     spikes = {
@@ -115,8 +118,14 @@ def main() -> None:
         style_axis(ax, f"Error Distribution - {label}")
 
     ax_loss = fig.add_subplot(gs[2, 0])
-    ax_loss.plot(losses, color="#f2cc60", linewidth=1.5)
-    ax_loss.fill_between(np.arange(len(losses)), losses, color="#f2cc60", alpha=0.18)
+    loss_x = losses_df["epoch"].to_numpy() if "epoch" in losses_df.columns else np.arange(1, len(losses) + 1)
+    ax_loss.plot(loss_x, losses, color="#f2cc60", linewidth=1.5)
+    ax_loss.fill_between(loss_x, losses, color="#f2cc60", alpha=0.18)
+    if "validation_mse_loss" in losses_df.columns:
+        ax_loss.plot(loss_x, losses_df["validation_mse_loss"].to_numpy(), color="#58a6ff", linewidth=1.1, alpha=0.9)
+        ax_loss.legend(["Training", "Validation"], facecolor=panel, labelcolor=text, edgecolor="#586170", fontsize=7)
+    if len(losses) == 1:
+        ax_loss.scatter(loss_x, losses, color="#f2cc60", s=36)
     ax_loss.set_xlabel("Epoch")
     ax_loss.set_ylabel("MSE")
     style_axis(ax_loss, "Training Loss")
@@ -172,11 +181,12 @@ def main() -> None:
     ax_latency.legend(loc="upper right", facecolor=panel, labelcolor=text, edgecolor="#586170", fontsize=8)
     style_axis(ax_timeline, "Traffic Forecast with Latency Overlay")
 
-    dashboard_path = in_output_dir(args.output)
+    output_name = Path(args.output).name
+    dashboard_path = Path(args.output) if Path(args.output).is_absolute() else artifact_path(output_dir, output_name, "images")
     plt.savefig(dashboard_path, dpi=150, bbox_inches="tight", facecolor=bg)
-    (output_dir / "spike_summary.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    artifact_path(output_dir, "spike_summary.json", "json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     print(f"Dashboard saved -> {dashboard_path}")
-    print(f"Spike summary saved -> {output_dir / 'spike_summary.json'}")
+    print(f"Spike summary saved -> {artifact_path(output_dir, 'spike_summary.json', 'json')}")
 
 
 if __name__ == "__main__":

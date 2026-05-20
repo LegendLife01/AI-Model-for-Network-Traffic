@@ -1,9 +1,9 @@
 param(
-    [ValidateSet("synthetic", "kaggle", "simulate", "live", "deploy", "destroy", "train", "visualize")]
+    [ValidateSet("synthetic", "kaggle", "kaggle_opt", "dataset_opt", "simulate", "live", "deploy", "destroy", "train", "visualize")]
     [string]$Mode = "synthetic",
     [int]$Samples = 720,
     [int]$Interval = 1,
-    [int]$Epochs = 120,
+    [int]$Epochs = 130,
     [switch]$SkipInstall
 )
 
@@ -13,7 +13,7 @@ $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $MlDir = Join-Path $ProjectDir "ml"
 $RunStamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $RunDir = Join-Path (Join-Path $ProjectDir "runs") "$($RunStamp)_$Mode"
-$DataFile = Join-Path $RunDir "telemetry.csv"
+$DataFile = Join-Path (Join-Path $RunDir "raw_data") "telemetry.csv"
 
 function Log-Step($Message) {
     Write-Host ""
@@ -93,12 +93,57 @@ function Invoke-ModelPipeline($Python, $InputCsv, $OutputDir) {
     }
 
     Log-Step "Building dashboard"
-    & $Python visualize.py --data (Join-Path $OutputDir "telemetry.csv") --output-dir $OutputDir
+    & $Python visualize.py --data (Join-Path (Join-Path $OutputDir "raw_data") "telemetry.csv") --output-dir $OutputDir
     if ($LASTEXITCODE -ne 0) {
         Pop-Location
         throw "Dashboard generation failed."
     }
+
+    Log-Step "Evaluating model"
+    & $Python evaluate_model.py --run-dir $OutputDir
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        throw "Model evaluation failed."
+    }
+
+    Log-Step "Exporting readable model report"
+    & $Python export_model_report.py --run-dir $OutputDir
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        throw "Readable model export failed."
+    }
     Pop-Location
+
+    Log-Step "Cleaning empty run folders"
+    Push-Location $ProjectDir
+    & $Python scripts\cleanup_runs.py
+    Pop-Location
+}
+
+function New-RunFolder($RunDir) {
+    New-Item -ItemType Directory -Path (Join-Path $RunDir "raw_data") -Force | Out-Null
+}
+
+function Show-RunArtifacts($RunDir) {
+    Write-Host "Artifacts:"
+    Write-Host "  $(Join-Path (Join-Path $RunDir 'raw_data') 'telemetry.csv')"
+    Write-Host "  $(Join-Path (Join-Path $RunDir 'images') 'traffic_prediction_dashboard.png')"
+    Write-Host "  $(Join-Path (Join-Path $RunDir 'images') 'model_evaluation_dashboard.png')"
+    Write-Host "  $(Join-Path (Join-Path $RunDir 'json') 'evaluation_summary.json')"
+    Write-Host "  $(Join-Path (Join-Path $RunDir 'json') 'model_metadata.json')"
+
+    $lstmModel = Join-Path (Join-Path $RunDir "model") "lstm_model.pth"
+    $datasetModel = Join-Path (Join-Path $RunDir "model") "dataset_model.joblib"
+    if (Test-Path $lstmModel) {
+        Write-Host "  $(Join-Path (Join-Path $RunDir 'model') 'model_readable_report.md')"
+        Write-Host "Binary model weights:"
+        Write-Host "  $lstmModel"
+    } elseif (Test-Path $datasetModel) {
+        Write-Host "Dataset model artifact:"
+        Write-Host "  $datasetModel"
+    }
+    Write-Host "Run folder:"
+    Write-Host "  $RunDir"
 }
 
 function Invoke-KaggleTelemetry($Python, $OutputCsv, $Rows) {
@@ -116,7 +161,7 @@ function Invoke-KaggleTelemetry($Python, $OutputCsv, $Rows) {
     Invoke-WslBash "cd '$wslProject' && if [ ! -x .venv-kaggle/bin/python ]; then python3 -m venv .venv-kaggle; fi && .venv-kaggle/bin/python -c 'import kagglehub' 2>/dev/null || .venv-kaggle/bin/python -m pip install 'kagglehub[pandas-datasets]' && .venv-kaggle/bin/python ml/load_kaggle_data.py --rows $Rows --output '$wslOutputCsv'"
 }
 
-$NeedsPython = $Mode -in @("synthetic", "kaggle", "simulate", "live", "train", "visualize")
+$NeedsPython = $Mode -in @("synthetic", "kaggle", "kaggle_opt", "dataset_opt", "simulate", "live", "train", "visualize")
 if ($NeedsPython) {
     $Python = Get-PythonCommand
     if (-not $SkipInstall) {
@@ -127,7 +172,7 @@ if ($NeedsPython) {
 
 switch ($Mode) {
     "synthetic" {
-        New-Item -ItemType Directory -Path $RunDir -Force | Out-Null
+        New-RunFolder $RunDir
         Log-Step "Generating synthetic telemetry"
         Push-Location $MlDir
         & $Python generate_data.py --hours $Samples --output $DataFile --seed 7
@@ -136,14 +181,56 @@ switch ($Mode) {
     }
 
     "kaggle" {
-        New-Item -ItemType Directory -Path $RunDir -Force | Out-Null
+        New-RunFolder $RunDir
         Log-Step "Loading Kaggle network telemetry"
         Invoke-KaggleTelemetry $Python $DataFile $Samples
         Invoke-ModelPipeline $Python $DataFile $RunDir
     }
 
+    { $_ -in @("kaggle_opt", "dataset_opt") } {
+        New-RunFolder $RunDir
+        if ($Mode -eq "kaggle_opt") {
+            Log-Step "Loading Kaggle network telemetry"
+            Invoke-KaggleTelemetry $Python $DataFile $Samples
+        } else {
+            $sourceData = Join-Path $ProjectDir "ml\telemetry.csv"
+            if (-not (Test-Path $sourceData)) {
+                throw "dataset_opt needs a standard telemetry CSV at ml\telemetry.csv, or use kaggle_opt for Kaggle data."
+            }
+            Copy-Item $sourceData $DataFile -Force
+        }
+
+        Log-Step "Training dataset spike-aware model"
+        Push-Location $MlDir
+        & $Python train_dataset_model.py --data $DataFile --output-dir $RunDir --lookback 24 --spike-std 1.2 --spike-oversample 0
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            throw "Dataset optimized training failed."
+        }
+
+        Log-Step "Building dashboard"
+        & $Python visualize.py --data (Join-Path (Join-Path $RunDir "raw_data") "telemetry.csv") --output-dir $RunDir
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            throw "Dashboard generation failed."
+        }
+
+        Log-Step "Evaluating model"
+        & $Python evaluate_model.py --run-dir $RunDir
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            throw "Model evaluation failed."
+        }
+        Pop-Location
+
+        Log-Step "Cleaning empty run folders"
+        Push-Location $ProjectDir
+        & $Python scripts\cleanup_runs.py
+        Pop-Location
+    }
+
     "simulate" {
-        New-Item -ItemType Directory -Path $RunDir -Force | Out-Null
+        New-RunFolder $RunDir
         Log-Step "Collecting simulated telemetry with collector"
         Push-Location $ProjectDir
         & $Python scripts\collect_telemetry.py --mode simulate --samples $Samples --interval $Interval --output $DataFile
@@ -156,7 +243,7 @@ switch ($Mode) {
     }
 
     "live" {
-        New-Item -ItemType Directory -Path $RunDir -Force | Out-Null
+        New-RunFolder $RunDir
         Log-Step "Collecting live ContainerLab telemetry"
         if (Test-WindowsDockerLab) {
             Push-Location $ProjectDir
@@ -191,7 +278,7 @@ switch ($Mode) {
     "train" {
         Log-Step "Training LSTM from existing telemetry"
         $ExistingData = Join-Path $MlDir "telemetry.csv"
-        New-Item -ItemType Directory -Path $RunDir -Force | Out-Null
+        New-RunFolder $RunDir
         Invoke-ModelPipeline $Python $ExistingData $RunDir
     }
 
@@ -199,9 +286,9 @@ switch ($Mode) {
         Log-Step "Building dashboard from existing artifacts"
         $LatestRun = Get-ChildItem (Join-Path $ProjectDir "runs") -Directory -ErrorAction SilentlyContinue |
             Where-Object {
-                (Test-Path (Join-Path $_.FullName "predictions.csv")) -and
-                (Test-Path (Join-Path $_.FullName "actuals.csv")) -and
-                (Test-Path (Join-Path $_.FullName "train_losses.csv"))
+                (Test-Path (Join-Path $_.FullName "results\predictions.csv")) -and
+                (Test-Path (Join-Path $_.FullName "results\actuals.csv")) -and
+                (Test-Path (Join-Path $_.FullName "results\train_losses.csv"))
             } |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
@@ -209,7 +296,7 @@ switch ($Mode) {
             throw "No run folders with readable CSV artifacts found. Run .\run.ps1 synthetic first."
         }
         $RunDir = $LatestRun.FullName
-        $DataFile = Join-Path $RunDir "telemetry.csv"
+        $DataFile = Join-Path (Join-Path $RunDir "raw_data") "telemetry.csv"
         Push-Location $MlDir
         & $Python visualize.py --data $DataFile --output-dir $RunDir
         Pop-Location
@@ -217,9 +304,4 @@ switch ($Mode) {
 }
 
 Log-Step "Done"
-Write-Host "Artifacts:"
-Write-Host "  $DataFile"
-Write-Host "  $(Join-Path $RunDir 'lstm_model.pth')"
-Write-Host "  $(Join-Path $RunDir 'traffic_prediction_dashboard.png')"
-Write-Host "Run folder:"
-Write-Host "  $RunDir"
+Show-RunArtifacts $RunDir
