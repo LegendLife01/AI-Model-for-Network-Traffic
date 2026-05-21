@@ -149,6 +149,12 @@ python -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.
 
 ## Quick Trials
 
+Universal benchmark loop for the current `ml/telemetry.csv`:
+
+```powershell
+.\run.ps1 benchmark -TargetQuality 90 -MaxAttempts 12
+```
+
 Synthetic trial with 2000 generated samples and 40 LSTM epochs:
 
 ```powershell
@@ -391,6 +397,38 @@ Outputs:
 
 - `results/sequence_model_comparison.csv`
 - `json/sequence_model_comparison.json`
+
+## Universal Benchmark Mode
+
+`ml/auto_benchmark.py` profiles a telemetry CSV, chooses candidate trainers,
+trains, calibrates predictions on validation-only data, evaluates gates, and
+retries with adaptive candidates when a gate fails. It preserves chronological
+splits and does not fit scalers on validation or test rows.
+
+Manual command for any compatible CSV:
+
+```powershell
+python ml\auto_benchmark.py --data ml\telemetry.csv --output-dir runs\auto_generic --target-quality 90 --max-attempts 12 --sync-docs --docs-prefix generic_
+```
+
+The loop writes:
+
+- `profile.json`
+- `benchmark_log.jsonl`
+- `best_run.txt`
+- `json/benchmark_diagnosis.json` in the best run when the target is not met
+
+Runner shortcuts:
+
+```powershell
+.\run.ps1 benchmark -TargetQuality 90 -MaxAttempts 12
+.\run.ps1 synthetic -Samples 2000 -AutoBenchmark $true
+.\run.ps1 kaggle -Samples 8000 -AutoBenchmark $true
+```
+
+The benchmark target is aspirational for difficult external telemetry. If the
+loop cannot pass all gates within the attempt limit, it keeps the best measured
+run and records the bottleneck instead of rewriting metrics.
 
 ## Kaggle And Dataset Modes
 

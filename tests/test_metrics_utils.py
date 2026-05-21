@@ -6,7 +6,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "ml"))
 
-from ml.metrics_utils import compute_spike_scores, quality_score_v2, spike_thresholds_from_quantile, weighted_mae
+from ml.metrics_utils import compute_spike_scores, quality_score_v2, spike_thresholds_from_quantile, summarize_gates, weighted_mae
+from ml.telemetry_profile import profile_telemetry
 
 
 def test_spike_thresholds_and_scores_detect_predicted_spikes():
@@ -33,6 +34,32 @@ def test_quality_score_weights_features():
     assert weighted_mae(np.zeros((2, 3)), np.ones((2, 3))) == 1.0
 
 
+def test_gates_all_true_when_quality_high():
+    rows = [
+        {"metric": "traffic_mbps", "mae_improvement_pct": 20.0},
+        {"metric": "latency_ms", "mae_improvement_pct": 10.0},
+        {"metric": "packet_loss_pct", "mae_improvement_pct": 5.0},
+    ]
+    gates = summarize_gates(91.0, 15.0, rows, 0.6, 5, 92.0, 60.0)
+    assert all(gates.values())
+
+
+def test_profile_recommends_gb_on_small_rows(tmp_path):
+    rows = ["timestamp,traffic_mbps,latency_ms,packet_loss_pct"]
+    for idx in range(150):
+        rows.append(f"2026-01-01 00:{idx % 60:02d}:00,{10 + idx % 3},{2 + (idx % 2) * 0.1},0.01")
+    data = tmp_path / "small.csv"
+    data.write_text("\n".join(rows), encoding="utf-8")
+    profile = profile_telemetry(data)
+    assert profile.recommended_trainer == "gb_only"
+
+
 if __name__ == "__main__":
     test_spike_thresholds_and_scores_detect_predicted_spikes()
     test_quality_score_weights_features()
+    import tempfile
+    from pathlib import Path
+
+    test_gates_all_true_when_quality_high()
+    with tempfile.TemporaryDirectory() as tmp:
+        test_profile_recommends_gb_on_small_rows(Path(tmp))

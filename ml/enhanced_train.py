@@ -19,6 +19,7 @@ from sklearn.multioutput import MultiOutputRegressor
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
+from calibrate_predictions import apply_calibration, calibrate
 from run_layout import artifact_path, ensure_run_layout
 from train_kaggle_model import add_features
 from metrics_utils import spike_thresholds_from_quantile
@@ -94,6 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tune-ensemble-weights", action="store_true", default=True)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--export-onnx", action=argparse.BooleanOptionalAction, default=False, help="Export the LSTM component to ONNX.")
+    parser.add_argument("--calibrate", action=argparse.BooleanOptionalAction, default=True, help="Apply validation-only prediction calibration.")
     parser.add_argument("--output", default="lstm_model.pth")
     parser.add_argument("--output-dir", default="runs/hybrid_best")
     return parser.parse_args()
@@ -334,6 +336,14 @@ def main() -> None:
         lstm_weight = np.full(len(FEATURES), args.lstm_weight, dtype=float)
     val_ensemble_pred = gb_weight.reshape(1, -1) * gb_val_pred + lstm_weight.reshape(1, -1) * lstm_val_pred
     persistence_weight = optimize_persistence_blend(val_ensemble_pred, val_actuals)
+    calibration_params = None
+    if args.calibrate:
+        val_persistence = persistence_baseline(val_actuals)
+        val_after_persistence = (
+            persistence_weight.reshape(1, -1) * val_persistence
+            + (1.0 - persistence_weight.reshape(1, -1)) * val_ensemble_pred
+        )
+        calibration_params = calibrate(val_actuals, val_after_persistence, raw_spike_thresholds)
 
     gb_test_x, gb_test_y = oversample_spikes(
         x_gb[:gb_test_train_end],
@@ -356,6 +366,8 @@ def main() -> None:
     final_pred[:, 0] = np.maximum(final_pred[:, 0], traffic_guard)
     test_persistence = persistence_baseline(actuals)
     final_pred = persistence_weight.reshape(1, -1) * test_persistence + (1.0 - persistence_weight.reshape(1, -1)) * final_pred
+    if calibration_params is not None:
+        final_pred = apply_calibration(final_pred, calibration_params, test_persistence)
     final_pred = np.clip(final_pred, 0.0, None)
     residuals = actuals - final_pred
     residual_std = np.std(residuals, axis=0, ddof=0)
@@ -428,6 +440,14 @@ def main() -> None:
             "weight_selection": "validation_grid_search" if args.tune_ensemble_weights else "manual",
             "prediction_interval": "residual_normal_95",
             "onnx_status": onnx_status,
+            "calibration": None
+            if calibration_params is None
+            else {
+                "scale": calibration_params.scale,
+                "bias": calibration_params.bias,
+                "persistence_weight": calibration_params.persistence_weight,
+                "spike_boost": calibration_params.spike_boost,
+            },
         }
     }
     for idx, feature in enumerate(FEATURES):

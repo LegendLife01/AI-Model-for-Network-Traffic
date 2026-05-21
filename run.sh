@@ -10,17 +10,20 @@ INTERVAL=5
 EPOCHS=130
 SKIP_INSTALL=0
 L_IPN=""
+TARGET_QUALITY=90
+MAX_ATTEMPTS=12
 
 usage() {
   cat <<EOF
 AI-driven network design pipeline
 
 Usage:
-  bash run.sh [synthetic|kaggle|live|deploy|destroy] [options]
+  bash run.sh [synthetic|kaggle|benchmark|live|deploy|destroy] [options]
 
 Modes:
   synthetic          Generate synthetic telemetry, train, visualize (default)
   kaggle             Load Kaggle telemetry, train, visualize
+  benchmark          Run universal benchmark on ml/telemetry.csv
   live               Collect telemetry from deployed ContainerLab, train, visualize
   deploy             Deploy ContainerLab topology
   destroy            Destroy ContainerLab topology
@@ -30,6 +33,8 @@ Options:
   --interval SEC     Seconds between live samples (default: 5)
   --epochs N         Training epochs (default: 130)
   --l-ipn N          Optional Kaggle local workstation id
+  --target-quality N Benchmark target quality (default: 90)
+  --max-attempts N   Benchmark retry limit (default: 12)
   --skip-install     Do not install Python dependencies
 EOF
 }
@@ -47,6 +52,8 @@ while [[ $# -gt 0 ]]; do
     --interval) INTERVAL="$2"; shift 2 ;;
     --epochs) EPOCHS="$2"; shift 2 ;;
     --l-ipn) L_IPN="$2"; shift 2 ;;
+    --target-quality) TARGET_QUALITY="$2"; shift 2 ;;
+    --max-attempts) MAX_ATTEMPTS="$2"; shift 2 ;;
     --skip-install) SKIP_INSTALL=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 1 ;;
@@ -67,18 +74,9 @@ install_deps() {
 }
 
 run_ml() {
-  log "Training LSTM"
-  cd "$ML_DIR"
-  python enhanced_train.py --data "$DATA_FILE" --epochs "$EPOCHS" --output-dir "$RUN_DIR"
-  log "Building dashboard"
-  python visualize.py --data "$RUN_DIR/raw_data/telemetry.csv" --output-dir "$RUN_DIR"
-  log "Evaluating model"
-  python evaluate_model.py --run-dir "$RUN_DIR"
-  log "Exporting readable model report"
-  python export_model_report.py --run-dir "$RUN_DIR"
-  log "Cleaning empty run folders"
   cd "$PROJECT_DIR"
-  python scripts/cleanup_runs.py
+  log "Running auto benchmark loop"
+  python ml/auto_benchmark.py --data "$DATA_FILE" --output-dir "$RUN_DIR" --target-quality "$TARGET_QUALITY" --max-attempts "$MAX_ATTEMPTS"
   log "Done"
   printf 'Run folder:\n  %s\nArtifacts:\n  %s\n  %s\n  %s\n  %s\n  %s\nBinary model weights:\n  %s\n' \
     "$RUN_DIR" "$RUN_DIR/raw_data/telemetry.csv" "$RUN_DIR/images/traffic_prediction_dashboard.png" "$RUN_DIR/images/model_evaluation_dashboard.png" "$RUN_DIR/json/model_metadata.json" "$RUN_DIR/model/model_readable_report.md" "$RUN_DIR/model/lstm_model.pth"
@@ -92,6 +90,13 @@ case "$MODE" in
     cd "$ML_DIR"
     python generate_data.py --hours "$SAMPLES" --output "$DATA_FILE" --seed 7
     run_ml
+    ;;
+  benchmark)
+    install_deps
+    mkdir -p "$RUN_DIR/raw_data"
+    cp "$PROJECT_DIR/ml/telemetry.csv" "$DATA_FILE"
+    cd "$PROJECT_DIR"
+    python ml/auto_benchmark.py --data "$DATA_FILE" --output-dir "$RUN_DIR" --target-quality "$TARGET_QUALITY" --max-attempts "$MAX_ATTEMPTS" --sync-docs --docs-prefix generic_
     ;;
   kaggle)
     install_deps

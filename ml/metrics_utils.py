@@ -79,3 +79,46 @@ def quality_score_v2(per_feature: dict[str, dict[str, float]], weights: dict[str
             int(row.get("actual_spikes", 0)),
         )
     return float(score / total_weight)
+
+
+def summarize_gates(
+    overall_quality: float,
+    avg_mae_improvement: float,
+    per_feature_rows: list[dict[str, float]],
+    traffic_spike_f1: float,
+    traffic_predicted_spikes: int,
+    model_quality: float,
+    persistence_quality: float,
+) -> dict[str, bool]:
+    return {
+        "quality_ge_90": overall_quality >= 90.0,
+        "mae_improvement_ge_15": avg_mae_improvement >= 15.0,
+        "beats_persistence_each_feature_mae": all(float(row["mae_improvement_pct"]) > 0.0 for row in per_feature_rows),
+        "traffic_spike_f1_ge_0_50": traffic_spike_f1 >= 0.50,
+        "traffic_predicted_spikes_ge_5": traffic_predicted_spikes >= 5,
+        "model_quality_gt_persistence": model_quality > persistence_quality,
+    }
+
+
+def diagnose_quality_shortfall(summary: dict) -> dict[str, str | float]:
+    per_feature = summary.get("per_feature", [])
+    if not per_feature:
+        return {"bottleneck_feature": "unknown", "bottleneck_reason": "missing_per_feature_metrics", "suggested_candidate": "hybrid_default"}
+    worst = min(per_feature, key=lambda row: float(row.get("quality_pct", 0.0)))
+    feature = str(worst.get("metric", "unknown"))
+    reason = "low_quality"
+    if float(worst.get("mae_improvement_pct", 0.0)) <= 0.0:
+        reason = "does_not_beat_persistence_mae"
+    elif float(worst.get("model_r2", 0.0)) < 0.1:
+        reason = "low_r2"
+    gates = summary.get("gates_passed", {})
+    if not gates.get("traffic_spike_f1_ge_0_50", True):
+        reason = "low_traffic_spike_f1"
+        feature = "traffic_mbps"
+    suggestion = "gb_spike" if reason in {"does_not_beat_persistence_mae", "low_traffic_spike_f1"} else "hybrid_aggressive"
+    return {
+        "bottleneck_feature": feature,
+        "bottleneck_reason": reason,
+        "suggested_candidate": suggestion,
+        "quality": float(summary.get("overall", {}).get("normalized_quality_pct", 0.0)),
+    }

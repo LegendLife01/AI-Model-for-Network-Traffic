@@ -1,10 +1,13 @@
 param(
-    [ValidateSet("synthetic", "kaggle", "kaggle_opt", "dataset_opt", "simulate", "live", "deploy", "destroy", "train", "visualize")]
+    [ValidateSet("synthetic", "kaggle", "kaggle_opt", "dataset_opt", "simulate", "live", "deploy", "destroy", "train", "visualize", "benchmark")]
     [string]$Mode = "synthetic",
     [int]$Samples = 720,
     [int]$Interval = 1,
     [int]$Epochs = 130,
     [int]$LIpn = -1,
+    [double]$TargetQuality = 90,
+    [int]$MaxAttempts = 12,
+    [bool]$AutoBenchmark = $true,
     [switch]$SkipInstall
 )
 
@@ -85,6 +88,17 @@ function Invoke-ContainerLab($Action) {
 }
 
 function Invoke-ModelPipeline($Python, $InputCsv, $OutputDir) {
+    if ($AutoBenchmark) {
+        Log-Step "Running auto benchmark loop"
+        Push-Location $ProjectDir
+        & $Python ml\auto_benchmark.py --data $InputCsv --output-dir $OutputDir --target-quality $TargetQuality --max-attempts $MaxAttempts
+        Pop-Location
+        if ($LASTEXITCODE -ne 0) {
+            throw "Auto benchmark failed."
+        }
+        return
+    }
+
     Log-Step "Training LSTM"
     Push-Location $MlDir
     & $Python enhanced_train.py --data $InputCsv --epochs $Epochs --output-dir $OutputDir
@@ -167,7 +181,7 @@ function Invoke-KaggleTelemetry($Python, $OutputCsv, $Rows, $LIpn) {
     Invoke-WslBash "cd '$wslProject' && if [ ! -x .venv-kaggle/bin/python ]; then python3 -m venv .venv-kaggle; fi && .venv-kaggle/bin/python -c 'import kagglehub' 2>/dev/null || .venv-kaggle/bin/python -m pip install 'kagglehub[pandas-datasets]' && .venv-kaggle/bin/python ml/load_kaggle_data.py --rows $Rows --output '$wslOutputCsv' --augment --seed 42 $wslLIpn"
 }
 
-$NeedsPython = $Mode -in @("synthetic", "kaggle", "kaggle_opt", "dataset_opt", "simulate", "live", "train", "visualize")
+$NeedsPython = $Mode -in @("synthetic", "kaggle", "kaggle_opt", "dataset_opt", "simulate", "live", "train", "visualize", "benchmark")
 if ($NeedsPython) {
     $Python = Get-PythonCommand
     if (-not $SkipInstall) {
@@ -288,6 +302,22 @@ switch ($Mode) {
         $ExistingData = Join-Path $MlDir "telemetry.csv"
         New-RunFolder $RunDir
         Invoke-ModelPipeline $Python $ExistingData $RunDir
+    }
+
+    "benchmark" {
+        Log-Step "Running universal benchmark from ml\telemetry.csv"
+        $ExistingData = Join-Path $MlDir "telemetry.csv"
+        if (-not (Test-Path $ExistingData)) {
+            throw "No ml\telemetry.csv found for benchmark mode."
+        }
+        New-RunFolder $RunDir
+        Copy-Item $ExistingData $DataFile -Force
+        Push-Location $ProjectDir
+        & $Python ml\auto_benchmark.py --data $DataFile --output-dir $RunDir --target-quality $TargetQuality --max-attempts $MaxAttempts --sync-docs --docs-prefix generic_
+        Pop-Location
+        if ($LASTEXITCODE -ne 0) {
+            throw "Universal benchmark failed."
+        }
     }
 
     "visualize" {

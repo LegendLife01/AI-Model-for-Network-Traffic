@@ -20,7 +20,7 @@ import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from enhanced_train import EnhancedMultivariateTrafficLSTM, StackedHybridLSTM
-from metrics_utils import feature_quality, quality_score_v2, spike_thresholds_from_quantile
+from metrics_utils import FEATURE_WEIGHTS, feature_quality, quality_score_v2, spike_thresholds_from_quantile
 from train_model import FEATURES, MultivariateTrafficLSTM
 from run_layout import artifact_path, ensure_run_layout, find_artifact
 
@@ -170,6 +170,8 @@ def summarize_baselines(
     for method, values in methods.items():
         method_metrics = regression_metrics(actuals, values)
         quality_values = []
+        weighted_quality = 0.0
+        total_weight = 0.0
         if baseline_spikes is not None and method in baseline_spikes:
             spike_df = baseline_spikes[method].set_index("metric")
         else:
@@ -181,15 +183,16 @@ def summarize_baselines(
                 spike_f1 = float(spike_row["f1"])
             else:
                 spike_f1 = 0.0
-            quality_values.append(
-                feature_quality(
-                    method_metrics[feature]["mae"],
-                    persistence_metrics[feature]["mae"],
-                    method_metrics[feature]["r2"],
-                    spike_f1,
-                    int(spike_df.loc[feature]["actual_spikes"]) if spike_df is not None and feature in spike_df.index else 0,
-                )
+            feature_score = feature_quality(
+                method_metrics[feature]["mae"],
+                persistence_metrics[feature]["mae"],
+                method_metrics[feature]["r2"],
+                spike_f1,
+                int(spike_df.loc[feature]["actual_spikes"]) if spike_df is not None and feature in spike_df.index else 0,
             )
+            quality_values.append(feature_score)
+            weighted_quality += FEATURE_WEIGHTS[feature] * feature_score
+            total_weight += FEATURE_WEIGHTS[feature]
 
         rows.append(
             {
@@ -197,7 +200,7 @@ def summarize_baselines(
                 "mae": float(np.mean([method_metrics[feature]["mae"] for feature in FEATURES])),
                 "rmse": float(np.mean([method_metrics[feature]["rmse"] for feature in FEATURES])),
                 "r2": float(np.mean([method_metrics[feature]["r2"] for feature in FEATURES])),
-                "quality_pct": float(np.mean(quality_values)),
+                "quality_pct": float(weighted_quality / max(total_weight, 1e-9)),
             }
         )
     return pd.DataFrame(rows)
@@ -211,7 +214,9 @@ def spike_analysis(
     spike_quantile: float = 0.90,
 ) -> pd.DataFrame:
     rows = []
-    saved_thresholds = metrics_json.get("training", {}).get("spike_thresholds", {})
+    training = metrics_json.get("training", {})
+    spike_quantile = float(training.get("spike_quantile", spike_quantile))
+    saved_thresholds = training.get("spike_thresholds", {})
     train_row_count = max(1, len(telemetry) - len(actuals))
     train_values = telemetry[FEATURES].dropna().to_numpy(dtype=float)[:train_row_count]
     quantile_thresholds = spike_thresholds_from_quantile(train_values, spike_quantile)
