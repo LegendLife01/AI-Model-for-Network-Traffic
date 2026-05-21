@@ -21,7 +21,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from run_layout import artifact_path, ensure_run_layout
 from train_kaggle_model import add_features
-from train_model import FEATURES, INPUT_FEATURES, TIME_FEATURES, create_sequences, inverse_transform_features, load_dataset, transform_features
+from metrics_utils import spike_thresholds_from_quantile
+from train_model import FEATURES, INPUT_FEATURES, TIME_FEATURES, SpikeWeightedLoss, create_sequences, inverse_transform_features, load_dataset, transform_features
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -32,17 +33,25 @@ if hasattr(sys.stdout, "reconfigure"):
 class EnhancedMultivariateTrafficLSTM(nn.Module):
     def __init__(self, input_size: int = 7, hidden_size: int = 128, num_layers: int = 2, output_size: int = 3):
         super().__init__()
+        self.input_norm = nn.LayerNorm(input_size)
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=0.2 if num_layers > 1 else 0.0)
         self.attention = nn.Sequential(nn.Linear(hidden_size, 64), nn.Tanh(), nn.Linear(64, 1))
         self.norm = nn.LayerNorm(hidden_size)
-        self.head = nn.Sequential(nn.Linear(hidden_size, 64), nn.ReLU(), nn.Dropout(0.2), nn.Linear(64, output_size))
+        self.context_dropout = nn.Dropout(0.3)
+        self.heads = nn.ModuleList(
+            [
+                nn.Sequential(nn.Linear(hidden_size, 64), nn.ReLU(), nn.Dropout(0.2), nn.Linear(64, 1))
+                for _ in range(output_size)
+            ]
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.input_norm(x)
         out, _ = self.lstm(x)
         weights = torch.softmax(self.attention(out), dim=1)
         context = torch.sum(weights * out, dim=1)
-        context = self.norm(context + out[:, -1])
-        return self.head(context)
+        context = self.context_dropout(self.norm(context + out[:, -1]))
+        return torch.cat([head(context) for head in self.heads], dim=1)
 
 
 class StackedHybridLSTM(nn.Module):
@@ -69,17 +78,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--layers", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--lr", type=float, default=0.0003)
+    parser.add_argument("--spike-quantile", type=float, default=0.90)
+    parser.add_argument("--spike-weight", type=float, default=4.0)
+    parser.add_argument("--focal-gamma", type=float, default=0.3)
     parser.add_argument("--train-ratio", type=float, default=0.70, help="Chronological training fraction.")
     parser.add_argument("--test-ratio", type=float, default=0.82, help="Chronological test start fraction; validation is between train and test.")
     parser.add_argument("--train-split", type=float, default=None, help="Deprecated alias for --test-ratio.")
     parser.add_argument("--validation-split", type=float, default=None, help="Deprecated alias for --train-ratio.")
-    parser.add_argument("--early-stop-patience", type=int, default=16)
+    parser.add_argument("--early-stop-patience", type=int, default=20)
     parser.add_argument("--early-stop-delta", type=float, default=1e-5)
+    parser.add_argument("--grad-accum-steps", type=int, default=2)
     parser.add_argument("--gb-weight", type=float, default=0.65)
     parser.add_argument("--lstm-weight", type=float, default=0.35)
     parser.add_argument("--tune-ensemble-weights", action="store_true", default=True)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--export-onnx", action=argparse.BooleanOptionalAction, default=False, help="Export the LSTM component to ONNX.")
     parser.add_argument("--output", default="lstm_model.pth")
     parser.add_argument("--output-dir", default="runs/hybrid_best")
     return parser.parse_args()
@@ -100,16 +114,65 @@ def gb_slice_for_sequences(start_idx: int, end_idx: int, sequence_length: int, l
     return slice(start, end)
 
 
-def optimize_ensemble_weight(gb_pred: np.ndarray, lstm_pred: np.ndarray, actuals: np.ndarray) -> tuple[float, float]:
-    best_weight = 0.65
-    best_score = float("inf")
-    for weight in np.linspace(0.0, 1.0, 41):
-        prediction = weight * gb_pred + (1.0 - weight) * lstm_pred
-        score = normalized_mse(prediction, actuals)
-        if score < best_score:
-            best_score = score
-            best_weight = float(weight)
-    return best_weight, 1.0 - best_weight
+def optimize_ensemble_weights(gb_pred: np.ndarray, lstm_pred: np.ndarray, actuals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    gb_weights = np.zeros(actuals.shape[1], dtype=float)
+    for idx in range(actuals.shape[1]):
+        best_weight = 0.65
+        best_score = float("inf")
+        threshold = float(np.quantile(actuals[:, idx], 0.90))
+        actual_spikes = actuals[:, idx] > threshold
+        for weight in np.linspace(0.0, 1.0, 41):
+            prediction = weight * gb_pred[:, idx] + (1.0 - weight) * lstm_pred[:, idx]
+            mae = float(np.mean(np.abs(prediction - actuals[:, idx])))
+            pred_spikes = prediction > threshold
+            tp = float(np.sum(actual_spikes & pred_spikes))
+            fp = float(np.sum(~actual_spikes & pred_spikes))
+            fn = float(np.sum(actual_spikes & ~pred_spikes))
+            precision = tp / max(tp + fp, 1.0)
+            recall = tp / max(tp + fn, 1.0)
+            f1 = 2.0 * precision * recall / max(precision + recall, 1e-9)
+            spike_penalty = 0.20 * float(np.std(actuals[:, idx], ddof=0)) * (1.0 - f1)
+            score = mae + spike_penalty
+            if score < best_score:
+                best_score = score
+                best_weight = float(weight)
+        gb_weights[idx] = best_weight
+    return gb_weights, 1.0 - gb_weights
+
+
+def oversample_spikes(x_train: np.ndarray, y_train: np.ndarray, thresholds: dict[str, float], repeats: int = 3) -> tuple[np.ndarray, np.ndarray]:
+    spike_mask = np.zeros(len(y_train), dtype=bool)
+    for idx, feature in enumerate(FEATURES):
+        spike_mask |= y_train[:, idx] > thresholds[feature]
+    if not np.any(spike_mask):
+        return x_train, y_train
+    return (
+        np.concatenate([x_train, *([x_train[spike_mask]] * repeats)], axis=0),
+        np.concatenate([y_train, *([y_train[spike_mask]] * repeats)], axis=0),
+    )
+
+
+def persistence_baseline(actuals: np.ndarray) -> np.ndarray:
+    baseline = np.empty_like(actuals)
+    baseline[0] = actuals[0]
+    baseline[1:] = actuals[:-1]
+    return baseline
+
+
+def optimize_persistence_blend(model_pred: np.ndarray, actuals: np.ndarray) -> np.ndarray:
+    persistence = persistence_baseline(actuals)
+    weights = np.zeros(actuals.shape[1], dtype=float)
+    for idx in range(actuals.shape[1]):
+        best_weight = 0.0
+        best_mae = float("inf")
+        for weight in np.linspace(0.0, 0.95, 20):
+            prediction = weight * persistence[:, idx] + (1.0 - weight) * model_pred[:, idx]
+            mae = float(np.mean(np.abs(prediction - actuals[:, idx])))
+            if mae < best_mae:
+                best_mae = mae
+                best_weight = float(weight)
+        weights[idx] = best_weight
+    return weights
 
 
 def main() -> None:
@@ -159,6 +222,12 @@ def main() -> None:
     y_val = target_scaler.transform(y_val_raw)
     y_test = target_scaler.transform(y_test_raw)
 
+    raw_spike_thresholds = spike_thresholds_from_quantile(inverse_transform_features(y_train_raw.copy()), args.spike_quantile)
+    transformed_spike_thresholds = spike_thresholds_from_quantile(y_train_raw, args.spike_quantile)
+    scaled_spike_thresholds = target_scaler.transform(
+        np.array([[transformed_spike_thresholds[feature] for feature in FEATURES]], dtype=np.float32)
+    )[0]
+
     train_loader = DataLoader(
         TensorDataset(torch.tensor(x_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.float32)),
         batch_size=args.batch_size,
@@ -169,9 +238,14 @@ def main() -> None:
     x_test_tensor = torch.tensor(x_test, dtype=torch.float32, device=device)
 
     lstm = SimpleLSTM(len(feature_cols), args.hidden_size, args.layers, len(FEATURES)).to(device)
-    optimizer = torch.optim.AdamW(lstm.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=8, min_lr=1e-5)
-    criterion = nn.MSELoss()
+    optimizer = torch.optim.AdamW(lstm.parameters(), lr=args.lr, weight_decay=1e-3)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=6, min_lr=1e-5)
+    criterion = SpikeWeightedLoss(
+        torch.tensor(scaled_spike_thresholds, dtype=torch.float32, device=device),
+        spike_weight=args.spike_weight,
+        focal_gamma=args.focal_gamma,
+    )
+    mse_criterion = nn.MSELoss()
 
     print("Training Hybrid LSTM component...")
     train_rows: list[dict[str, float]] = []
@@ -182,21 +256,23 @@ def main() -> None:
     for epoch in range(args.epochs):
         lstm.train()
         losses: list[float] = []
-        for batch_x, batch_y in train_loader:
+        optimizer.zero_grad()
+        for batch_idx, (batch_x, batch_y) in enumerate(train_loader):
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
-            optimizer.zero_grad()
             pred = lstm(batch_x)
-            loss = criterion(pred, batch_y)
+            loss = criterion(pred, batch_y) / max(args.grad_accum_steps, 1)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(lstm.parameters(), 1.0)
-            optimizer.step()
-            losses.append(float(loss.item()))
+            if (batch_idx + 1) % max(args.grad_accum_steps, 1) == 0 or batch_idx == len(train_loader) - 1:
+                torch.nn.utils.clip_grad_norm_(lstm.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+            losses.append(float(loss.item() * max(args.grad_accum_steps, 1)))
 
         lstm.eval()
         with torch.no_grad():
             val_pred = lstm(x_val_tensor)
-            val_loss = criterion(val_pred, y_val_tensor).item()
+            val_loss = mse_criterion(val_pred, y_val_tensor).item()
         scheduler.step(val_loss)
         train_loss_mean = float(np.mean(losses))
         if val_loss < best_val - args.early_stop_delta:
@@ -216,7 +292,8 @@ def main() -> None:
         )
         if epoch % 20 == 0 or epoch == args.epochs - 1:
             print(f"LSTM Epoch {epoch + 1} Loss: {train_loss_mean:.4f} | Val: {val_loss:.4f}")
-        if args.early_stop_patience > 0 and stale_epochs >= args.early_stop_patience:
+        min_epochs_before_stop = min(args.epochs, 40)
+        if args.early_stop_patience > 0 and epoch + 1 >= min_epochs_before_stop and stale_epochs >= args.early_stop_patience:
             print(f"Early stopping at epoch {epoch + 1}; best validation loss was epoch {best_epoch}.")
             break
 
@@ -234,10 +311,15 @@ def main() -> None:
     gb_val_train_end = max(1, gb_val_slice.start)
     gb_test_train_end = max(1, gb_test_slice.start)
 
-    gb_for_weight = MultiOutputRegressor(
-        GradientBoostingRegressor(n_estimators=300, learning_rate=0.05, max_depth=5, random_state=42)
+    gb_train_x, gb_train_y = oversample_spikes(
+        x_gb[:gb_val_train_end],
+        y_gb[:gb_val_train_end],
+        spike_thresholds_from_quantile(y_gb[:gb_val_train_end], args.spike_quantile),
     )
-    gb_for_weight.fit(x_gb[:gb_val_train_end], y_gb[:gb_val_train_end])
+    gb_for_weight = MultiOutputRegressor(
+        GradientBoostingRegressor(n_estimators=500, learning_rate=0.04, max_depth=4, subsample=0.85, random_state=42)
+    )
+    gb_for_weight.fit(gb_train_x, gb_train_y)
 
     with torch.no_grad():
         val_len = gb_val_slice.stop - gb_val_slice.start
@@ -246,14 +328,22 @@ def main() -> None:
     gb_val_pred = gb_for_weight.predict(x_gb[gb_val_slice])
     val_actuals = y_gb[gb_val_slice]
     if args.tune_ensemble_weights:
-        gb_weight, lstm_weight = optimize_ensemble_weight(gb_val_pred, lstm_val_pred, val_actuals)
+        gb_weight, lstm_weight = optimize_ensemble_weights(gb_val_pred, lstm_val_pred, val_actuals)
     else:
-        gb_weight, lstm_weight = args.gb_weight, args.lstm_weight
+        gb_weight = np.full(len(FEATURES), args.gb_weight, dtype=float)
+        lstm_weight = np.full(len(FEATURES), args.lstm_weight, dtype=float)
+    val_ensemble_pred = gb_weight.reshape(1, -1) * gb_val_pred + lstm_weight.reshape(1, -1) * lstm_val_pred
+    persistence_weight = optimize_persistence_blend(val_ensemble_pred, val_actuals)
 
-    gb = MultiOutputRegressor(
-        GradientBoostingRegressor(n_estimators=300, learning_rate=0.05, max_depth=5, random_state=42)
+    gb_test_x, gb_test_y = oversample_spikes(
+        x_gb[:gb_test_train_end],
+        y_gb[:gb_test_train_end],
+        spike_thresholds_from_quantile(y_gb[:gb_test_train_end], args.spike_quantile),
     )
-    gb.fit(x_gb[:gb_test_train_end], y_gb[:gb_test_train_end])
+    gb = MultiOutputRegressor(
+        GradientBoostingRegressor(n_estimators=500, learning_rate=0.04, max_depth=4, subsample=0.85, random_state=42)
+    )
+    gb.fit(gb_test_x, gb_test_y)
 
     with torch.no_grad():
         test_len = gb_test_slice.stop - gb_test_slice.start
@@ -261,7 +351,11 @@ def main() -> None:
     lstm_pred = inverse_transform_features(target_scaler.inverse_transform(lstm_scaled))
     gb_pred = gb.predict(x_gb[gb_test_slice])
     actuals = y_gb[gb_test_slice]
-    final_pred = gb_weight * gb_pred + lstm_weight * lstm_pred
+    final_pred = gb_weight.reshape(1, -1) * gb_pred + lstm_weight.reshape(1, -1) * lstm_pred
+    traffic_guard = 0.85 * gb_pred[:, 0] + 0.15 * lstm_pred[:, 0]
+    final_pred[:, 0] = np.maximum(final_pred[:, 0], traffic_guard)
+    test_persistence = persistence_baseline(actuals)
+    final_pred = persistence_weight.reshape(1, -1) * test_persistence + (1.0 - persistence_weight.reshape(1, -1)) * final_pred
     final_pred = np.clip(final_pred, 0.0, None)
     residuals = actuals - final_pred
     residual_std = np.std(residuals, axis=0, ddof=0)
@@ -276,20 +370,31 @@ def main() -> None:
             "feature_columns": gb_feature_cols,
             "features": FEATURES,
             "lookback": lookback,
-            "ensemble_weights": {"gradient_boosting": gb_weight, "lstm": lstm_weight},
+            "ensemble_weights": {
+                "gradient_boosting": {feature: float(gb_weight[idx]) for idx, feature in enumerate(FEATURES)},
+                "lstm": {feature: float(lstm_weight[idx]) for idx, feature in enumerate(FEATURES)},
+                "persistence_residual": {feature: float(persistence_weight[idx]) for idx, feature in enumerate(FEATURES)},
+            },
             "weight_selection": "validation_grid_search" if args.tune_ensemble_weights else "manual",
         },
         artifact_path(output_dir, "gb_model.joblib", "model"),
     )
-    torch.onnx.export(
-        lstm_cpu,
-        torch.randn(1, args.sequence_length, len(feature_cols)),
-        artifact_path(output_dir, "lstm_model.onnx", "model"),
-        export_params=True,
-        opset_version=18,
-        input_names=["input"],
-        output_names=["output"],
-    )
+    onnx_status = "disabled"
+    if args.export_onnx:
+        try:
+            torch.onnx.export(
+                lstm_cpu,
+                torch.randn(1, args.sequence_length, len(feature_cols)),
+                artifact_path(output_dir, "lstm_model.onnx", "model"),
+                export_params=True,
+                opset_version=18,
+                input_names=["input"],
+                output_names=["output"],
+            )
+            onnx_status = "exported"
+        except Exception as exc:  # pragma: no cover - depends on optional exporter packages
+            onnx_status = f"skipped: {exc.__class__.__name__}: {exc}"
+            print(f"ONNX export skipped: {exc}")
 
     metrics = {
         "training": {
@@ -313,10 +418,16 @@ def main() -> None:
             "ensemble": "lstm_gradient_boosting",
             "early_stop_patience": args.early_stop_patience,
             "early_stop_delta": args.early_stop_delta,
-            "gb_weight": gb_weight,
-            "lstm_weight": lstm_weight,
+            "spike_quantile": args.spike_quantile,
+            "spike_weight": args.spike_weight,
+            "focal_gamma": args.focal_gamma,
+            "spike_thresholds": raw_spike_thresholds,
+            "gb_weight": {feature: float(gb_weight[idx]) for idx, feature in enumerate(FEATURES)},
+            "lstm_weight": {feature: float(lstm_weight[idx]) for idx, feature in enumerate(FEATURES)},
+            "persistence_residual_weight": {feature: float(persistence_weight[idx]) for idx, feature in enumerate(FEATURES)},
             "weight_selection": "validation_grid_search" if args.tune_ensemble_weights else "manual",
             "prediction_interval": "residual_normal_95",
+            "onnx_status": onnx_status,
         }
     }
     for idx, feature in enumerate(FEATURES):
@@ -349,7 +460,12 @@ def main() -> None:
 
     print(f"\nHYBRID ENSEMBLE COMPLETE -> {output_dir}")
     print(f"Normalized ensemble MSE: {normalized_mse(final_pred, actuals):.4f}")
-    print(f"Learned ensemble weights: GradientBoosting={gb_weight:.2f}, LSTM={lstm_weight:.2f}")
+    print("Learned ensemble weights:")
+    for idx, feature in enumerate(FEATURES):
+        print(
+            f"  {feature}: GradientBoosting={gb_weight[idx]:.2f}, "
+            f"LSTM={lstm_weight[idx]:.2f}, PersistenceResidual={persistence_weight[idx]:.2f}"
+        )
     print("This should give stronger spike capture than the pure LSTM.")
 
 

@@ -30,7 +30,7 @@ currently call `ml/enhanced_train.py`.
 That trainer creates:
 
 - `model/lstm_model.pth`: PyTorch LSTM sequence model.
-- `model/lstm_model.onnx`: ONNX export of the LSTM component.
+- `model/lstm_model.onnx`: optional ONNX export of the LSTM component when `--export-onnx` is used and exporter dependencies are available.
 - `model/gb_model.joblib`: Gradient Boosting spike/tabular component.
 - `results/predictions.csv`: blended ensemble predictions.
 - `results/actuals.csv`: matching actual values.
@@ -40,8 +40,11 @@ That trainer creates:
 - `json/scaler_params.json`: input and target scaler metadata.
 
 The trainer starts from `65%` Gradient Boosting and `35%` LSTM, then tunes the
-blend on a chronological validation slice. This leans on Gradient Boosting for
-spike capture while still using the LSTM for time-window behavior.
+blend per target on a chronological validation slice. A final validation-tuned
+one-step persistence residual blend is also available inside the trainer. That
+residual branch is useful for next-step forecasting because the previous
+observed sample is known at inference time; it is not a claim that the model can
+see the current target.
 
 The current neural component is a stacked LSTM with temporal attention,
 LayerNorm, and a residual connection from the final hidden state.
@@ -77,14 +80,17 @@ The runner scripts connect the pipeline:
 - `ml/evaluate_model.py` compares the model against simple baselines.
 - `ml/export_model_report.py` writes human-readable model summaries.
 - `ml/compare_sequence_models.py` runs controlled LSTM/GRU/attention ablations.
+- `ml/metrics_utils.py` centralizes quality, weighted MAE, and spike scoring helpers.
 
 Why each part matters:
 
 - The LSTM branch learns temporal sequence behavior from lookback windows.
 - The Gradient Boosting branch uses lag and rolling-window features that are
   often strong for abrupt tabular spike patterns.
-- The ensemble weight search uses validation data to choose the blend instead
-  of assuming one fixed weight is always best.
+- The ensemble weight search uses validation data to choose per-feature blends
+  instead of assuming one fixed weight is always best.
+- The persistence residual branch tests whether the learned model adds value
+  over a strong one-step baseline.
 - The dashboards make model behavior inspectable instead of hiding everything
   behind one score.
 - The ablation runner helps prove whether attention or other sequence changes
@@ -192,19 +198,36 @@ Inspect these outputs:
 Do not treat one trial as proof of model superiority. Compare multiple runs and
 use the baseline/ablation outputs before making claims about improvement.
 
-## Example Evidence From A Kaggle Run
+## Current Evidence
 
-The repository includes a small set of checked-in evidence artifacts from a
-5000-row Kaggle run. These are not meant to prove that the model is universally
-best; they show how to inspect a run honestly.
+The repository includes checked-in evidence artifacts from one synthetic run and
+one Kaggle-derived run. These are not proof that the model is universally best;
+they show how to inspect a run honestly and where the current system still
+falls short.
 
-Data and command:
+Synthetic command:
 
 ```powershell
-.\run.ps1 kaggle -Samples 5000 -Epochs 60
+python ml\generate_data.py --hours 2000 --output runs\spec_synthetic_2000\raw_data\telemetry.csv --seed 7
+python ml\enhanced_train.py --data runs\spec_synthetic_2000\raw_data\telemetry.csv --output-dir runs\spec_synthetic_2000 --epochs 40 --sequence-length 96 --spike-weight 6
+python ml\visualize.py --data runs\spec_synthetic_2000\raw_data\telemetry.csv --output-dir runs\spec_synthetic_2000 --sensitivity 1.3
+python ml\evaluate_model.py --run-dir runs\spec_synthetic_2000 --export-docs --docs-prefix synthetic_
+```
+
+Kaggle command:
+
+```powershell
+python ml\load_kaggle_data.py --rows 5000 --output runs\spec_kaggle\raw_data\telemetry.csv --augment --seed 42
+python ml\enhanced_train.py --data runs\spec_kaggle\raw_data\telemetry.csv --output-dir runs\spec_kaggle_delta --epochs 60 --sequence-length 48 --spike-weight 6
+python ml\visualize.py --data runs\spec_kaggle\raw_data\telemetry.csv --output-dir runs\spec_kaggle_delta --sensitivity 1.3
+python ml\evaluate_model.py --run-dir runs\spec_kaggle_delta --export-docs --docs-prefix kaggle_
 ```
 
 Dashboard examples:
+
+![Synthetic traffic prediction dashboard](docs/images/synthetic_traffic_prediction_dashboard.png)
+
+![Synthetic model evaluation dashboard](docs/images/synthetic_model_evaluation_dashboard.png)
 
 ![Kaggle traffic prediction dashboard](docs/images/kaggle_traffic_prediction_dashboard.png)
 
@@ -215,25 +238,43 @@ Tracked evidence files:
 - `docs/results/kaggle_evaluation_summary.json`
 - `docs/results/kaggle_evaluation_baselines.csv`
 - `docs/results/kaggle_evaluation_spikes.csv`
+- `docs/results/synthetic_evaluation_summary.json`
+- `docs/results/synthetic_evaluation_baselines.csv`
+- `docs/results/synthetic_evaluation_spikes.csv`
 - `docs/results/sequence_model_comparison.csv`
 
-What this run showed:
+Latest measured summary:
 
-- Overall normalized quality: about `52.8%`.
-- MAE improved over persistence by about `10.1%`.
-- The model did not detect spikes on this Kaggle slice, so spike detection
-  remains an open weakness.
-- Persistence still had a higher combined quality score in this evaluation,
-  which is a useful warning that one aggregate score can conflict with MAE.
+| Dataset | Rows | Epochs | Quality | MAE vs Persistence | Beats Persistence Every Feature | Traffic Spike F1 Gate |
+|---|---:|---:|---:|---:|---|---|
+| Synthetic | 2000 | 40 | 78.3% | +24.7% | Yes | Yes |
+| Kaggle converted flow | 3980 | 60 | 57.2% | +3.2% average | No | No |
 
-The sequence ablation table from `ml/compare_sequence_models.py` showed:
+Per-feature MAE from the latest evidence runs:
+
+| Dataset | Feature | Model MAE | Persistence MAE | MAE Gain |
+|---|---|---:|---:|---:|
+| Synthetic | Traffic | 8.019 | 12.522 | +36.0% |
+| Synthetic | Latency | 0.966 | 1.387 | +30.3% |
+| Synthetic | Packet loss | 0.385 | 0.416 | +7.7% |
+| Kaggle | Traffic | 4.528 | 4.466 | -1.4% |
+| Kaggle | Latency | 0.905 | 1.006 | +10.0% |
+| Kaggle | Packet loss | 0.220 | 0.222 | +1.0% |
+
+The requested `>=90%` quality target was not reached in these measured runs.
+The synthetic run passes the concrete baseline and traffic-spike gates, but the
+Kaggle converted-flow run remains too close to persistence and still has weak
+traffic spike F1. That is the main current research/engineering gap.
+
+The current sequence ablation smoke run from `ml/compare_sequence_models.py`
+used the synthetic 2000-row evidence data for 20 epochs and showed:
 
 | Model | Validation MSE | Test MAE | SMAPE | Spike F1 |
 |---|---:|---:|---:|---:|
-| Attention LSTM | 0.6443 | 3.1301 | 0.4424 | 0.2745 |
-| LSTM | 0.6452 | 2.9573 | 0.4298 | 0.2601 |
-| GRU | 0.6453 | 3.1468 | 0.4395 | 0.2623 |
-| Mean LSTM | 0.6528 | 3.0840 | 0.4462 | 0.2652 |
+| Attention LSTM | 0.6385 | 3.9173 | 0.5097 | 0.3376 |
+| LSTM | 0.6545 | 3.7132 | 0.5071 | 0.3178 |
+| GRU | 0.6702 | 3.9089 | 0.5097 | 0.2866 |
+| Mean LSTM | 0.7512 | 5.3300 | 0.6033 | 0.1647 |
 
 This is why the project includes ablation tooling: attention had the best
 validation MSE in this run, but the plain LSTM had the best test MAE. That is a
@@ -292,7 +333,7 @@ Each complete run contains:
 - `images/traffic_prediction_dashboard.png`
 - `images/model_evaluation_dashboard.png`
 - `model/lstm_model.pth`
-- `model/lstm_model.onnx`
+- `model/lstm_model.onnx` if `--export-onnx` was used
 - `model/gb_model.joblib`
 - `model/model_readable_report.md`
 - `model/model_weights_summary.csv`
@@ -316,10 +357,12 @@ The hybrid trainer uses:
 - Chronological split: `--train-ratio 0.70`, validation until `--test-ratio 0.82`, test after that
 - Early stopping: validation-loss patience coordinated with the LR scheduler
 - Learning-rate scheduler: `ReduceLROnPlateau`, factor `0.5`, patience `8`, min LR `1e-5`
-- Gradient Boosting estimators: `300`
-- Gradient Boosting learning rate: `0.05`
-- Gradient Boosting max depth: `5`
-- Ensemble weights: validation-tuned from a `0.65` Gradient Boosting, `0.35` LSTM starting point
+- Gradient Boosting estimators: `500`
+- Gradient Boosting learning rate: `0.04`
+- Gradient Boosting max depth: `4`
+- Gradient Boosting subsample: `0.85`
+- Ensemble weights: validation-tuned per feature from a `0.65` Gradient Boosting, `0.35` LSTM starting point
+- Residual baseline: validation-tuned one-step persistence blend per feature
 - Packet loss transform: `log1p` during neural training, `expm1` after neural prediction
 - GPU support: automatic CUDA use when available, or explicit `--device cpu` / `--device cuda`
 - Uncertainty output: residual-normal 95% intervals in `results/prediction_intervals.csv`
@@ -414,6 +457,12 @@ If ONNX export fails with `ModuleNotFoundError: No module named 'onnxscript'`:
 
 ```powershell
 python -m pip install onnx onnxscript
+```
+
+ONNX export is optional in the enhanced trainer. Use it when needed:
+
+```powershell
+python ml\enhanced_train.py --data ml\telemetry.csv --output-dir runs\onnx_trial --export-onnx
 ```
 
 If pip has certificate errors:

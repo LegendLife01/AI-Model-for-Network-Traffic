@@ -1,41 +1,84 @@
 {
   "overall": {
-    "normalized_quality_pct": 52.82517269613492,
-    "mae_improvement_vs_persistence_pct": 10.060530638832534,
-    "final_training_loss": 0.981434930667833,
-    "epochs": 34,
-    "rows": 5000,
-    "test_samples": 883
+    "normalized_quality_pct": 57.21519913475129,
+    "mae_improvement_vs_persistence_pct": 3.216250433681934,
+    "final_training_loss": 15.501381262790323,
+    "epochs": 60,
+    "rows": 3980,
+    "test_samples": 708
+  },
+  "per_feature": [
+    {
+      "metric": "traffic_mbps",
+      "unit": "Mbps",
+      "model_mae": 4.5284740441411975,
+      "baseline_mae": 4.466207627118644,
+      "mae_improvement_pct": -1.3941675403640932,
+      "model_rmse": 15.771096446061309,
+      "baseline_rmse": 16.174006561804635,
+      "model_r2": -0.757749767809136,
+      "quality_pct": 58.31552694148245
+    },
+    {
+      "metric": "latency_ms",
+      "unit": "ms",
+      "model_mae": 0.9052840171270327,
+      "baseline_mae": 1.0061864406779661,
+      "mae_improvement_pct": 10.028203469224417,
+      "model_rmse": 2.1075690659792623,
+      "baseline_rmse": 2.5160072412163497,
+      "model_r2": -0.2872877828491822,
+      "quality_pct": 55.51681960264626
+    },
+    {
+      "metric": "packet_loss_pct",
+      "unit": "%",
+      "model_mae": 0.21986617013919127,
+      "baseline_mae": 0.22212005649717517,
+      "mae_improvement_pct": 1.0147153721854771,
+      "model_rmse": 0.7291628091721595,
+      "baseline_rmse": 0.7477064167126161,
+      "model_r2": -0.7909690215419238,
+      "quality_pct": 56.71292305339398
+    }
+  ],
+  "gates_passed": {
+    "quality_ge_90": false,
+    "mae_improvement_ge_15": false,
+    "beats_persistence_each_feature_mae": false,
+    "traffic_spike_f1_ge_0_50": false,
+    "traffic_predicted_spikes_ge_5": true,
+    "model_quality_gt_persistence": true
   },
   "benchmark": {
-    "latency_ms": 40.95458125011646,
-    "throughput_samples_sec": 3125.413472507084,
-    "model_size_mb": 0.8425798416137695,
+    "latency_ms": 36.54445249994751,
+    "throughput_samples_sec": 3502.583600074015,
+    "model_size_mb": 0.9084978103637695,
     "device": "cpu",
-    "parameters": 219268,
+    "parameters": 235794,
     "artifact": "lstm_model.pth"
   },
   "baseline_comparison": [
     {
       "method": "Model",
-      "mae": 0.6042593433979748,
-      "rmse": 2.2537819340849983,
-      "r2": -0.0009648670096747969,
-      "quality_pct": 52.82517269613492
+      "mae": 1.8845414104691407,
+      "rmse": 6.202609440404243,
+      "r2": -0.612002190733414,
+      "quality_pct": 5.8935198629859356
     },
     {
       "method": "Persistence",
-      "mae": 0.6871683654209136,
-      "rmse": 3.110937694887611,
-      "r2": -0.8932737481981955,
-      "quality_pct": 55.41472246618448
+      "mae": 1.8981713747645952,
+      "rmse": 6.479240073244534,
+      "r2": -0.8555020165690852,
+      "quality_pct": 4.693694819257037
     },
     {
       "method": "Moving Average",
-      "mae": 0.6526282307789103,
-      "rmse": 2.462842832171311,
-      "r2": -0.19249429506293594,
-      "quality_pct": 53.596842275778954
+      "mae": 1.8960736503452604,
+      "rmse": 5.186152905838504,
+      "r2": -0.15884717760829684,
+      "quality_pct": 7.422277854297742
     }
   ],
   "notes": {

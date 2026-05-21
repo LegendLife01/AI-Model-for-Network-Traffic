@@ -9,16 +9,18 @@ SAMPLES=72
 INTERVAL=5
 EPOCHS=130
 SKIP_INSTALL=0
+L_IPN=""
 
 usage() {
   cat <<EOF
 AI-driven network design pipeline
 
 Usage:
-  bash run.sh [synthetic|live|deploy|destroy] [options]
+  bash run.sh [synthetic|kaggle|live|deploy|destroy] [options]
 
 Modes:
   synthetic          Generate synthetic telemetry, train, visualize (default)
+  kaggle             Load Kaggle telemetry, train, visualize
   live               Collect telemetry from deployed ContainerLab, train, visualize
   deploy             Deploy ContainerLab topology
   destroy            Destroy ContainerLab topology
@@ -27,6 +29,7 @@ Options:
   --samples N        Live sample count, or synthetic hours (default: 72)
   --interval SEC     Seconds between live samples (default: 5)
   --epochs N         Training epochs (default: 130)
+  --l-ipn N          Optional Kaggle local workstation id
   --skip-install     Do not install Python dependencies
 EOF
 }
@@ -43,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --samples) SAMPLES="$2"; shift 2 ;;
     --interval) INTERVAL="$2"; shift 2 ;;
     --epochs) EPOCHS="$2"; shift 2 ;;
+    --l-ipn) L_IPN="$2"; shift 2 ;;
     --skip-install) SKIP_INSTALL=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 1 ;;
@@ -87,6 +91,21 @@ case "$MODE" in
     log "Generating synthetic telemetry"
     cd "$ML_DIR"
     python generate_data.py --hours "$SAMPLES" --output "$DATA_FILE" --seed 7
+    run_ml
+    ;;
+  kaggle)
+    install_deps
+    mkdir -p "$RUN_DIR/raw_data"
+    if [[ "$SAMPLES" == "72" ]]; then
+      SAMPLES=8000
+    fi
+    log "Loading Kaggle network telemetry"
+    cd "$ML_DIR"
+    if [[ -n "$L_IPN" ]]; then
+      python load_kaggle_data.py --rows "$SAMPLES" --output "$DATA_FILE" --augment --seed 42 --l-ipn "$L_IPN"
+    else
+      python load_kaggle_data.py --rows "$SAMPLES" --output "$DATA_FILE" --augment --seed 42
+    fi
     run_ml
     ;;
   live)

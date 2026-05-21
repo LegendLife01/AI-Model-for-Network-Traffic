@@ -14,8 +14,9 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
+from metrics_utils import spike_thresholds_from_quantile
 from run_layout import artifact_path, ensure_run_layout
-from train_model import FEATURES, INPUT_FEATURES, TIME_FEATURES, create_sequences, inverse_transform_features, load_dataset, transform_features
+from train_model import FEATURES, INPUT_FEATURES, TIME_FEATURES, SpikeWeightedLoss, create_sequences, inverse_transform_features, load_dataset, transform_features
 
 
 class SequenceRegressor(nn.Module):
@@ -51,6 +52,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--layers", type=int, default=2)
     parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--spike-quantile", type=float, default=0.90)
+    parser.add_argument("--spike-weight", type=float, default=3.0)
     parser.add_argument("--train-ratio", type=float, default=0.70)
     parser.add_argument("--test-ratio", type=float, default=0.82)
     parser.add_argument("--early-stop-patience", type=int, default=12)
@@ -98,7 +101,12 @@ def train_one(
     model = SequenceRegressor(mode, x_train.shape[-1], args.hidden_size, args.layers, len(FEATURES)).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=8, min_lr=1e-5)
-    criterion = nn.MSELoss()
+    thresholds = spike_thresholds_from_quantile(y_train, args.spike_quantile)
+    criterion = SpikeWeightedLoss(
+        torch.tensor([thresholds[feature] for feature in FEATURES], dtype=torch.float32, device=device),
+        spike_weight=args.spike_weight,
+    )
+    mse_criterion = nn.MSELoss()
     best_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
     best_val = float("inf")
     stale_epochs = 0
@@ -119,7 +127,7 @@ def train_one(
             losses.append(float(loss.item()))
         model.eval()
         with torch.no_grad():
-            val_loss = float(criterion(model(x_val_tensor), y_val_tensor).item())
+            val_loss = float(mse_criterion(model(x_val_tensor), y_val_tensor).item())
         scheduler.step(val_loss)
         if val_loss < best_val - args.early_stop_delta:
             best_val = val_loss
@@ -188,8 +196,20 @@ def main() -> None:
 
     comparison = pd.DataFrame(rows).sort_values("val_mse")
     comparison.to_csv(artifact_path(output_dir, "sequence_model_comparison.csv", "results"), index=False)
+    recommendation = comparison.iloc[0].to_dict()
     artifact_path(output_dir, "sequence_model_comparison.json", "json").write_text(
-        json.dumps({"models": rows, "loss_curves": curves}, indent=2),
+        json.dumps(
+            {
+                "models": rows,
+                "loss_curves": curves,
+                "recommended_architecture": {
+                    "selection_rule": "lowest chronological validation MSE",
+                    "model": recommendation["model"],
+                    "validation_mse": float(recommendation["val_mse"]),
+                },
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
     print(comparison.to_string(index=False))

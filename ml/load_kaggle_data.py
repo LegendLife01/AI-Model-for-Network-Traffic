@@ -15,6 +15,7 @@ available rows.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -93,14 +94,16 @@ def build_telemetry(
         )
         source_label = f"l_ipn={l_ipn}"
     else:
+        l_ipn = int(data["l_ipn"].value_counts().idxmax())
         group_cols = ["date", "l_ipn"] + (["r_asn"] if "r_asn" in data.columns else [])
         profile = (
-            data.groupby(group_cols, as_index=False)["f"]
+            data[data["l_ipn"] == l_ipn]
+            .groupby(group_cols, as_index=False)["f"]
             .sum()
             .sort_values(group_cols)
             .reset_index(drop=True)
         )
-        source_label = "all_l_ipn"
+        source_label = f"auto_most_active_l_ipn={l_ipn}"
 
     if len(profile) < 2:
         raise ValueError("Selected workstation profile has too few rows.")
@@ -146,10 +149,13 @@ def build_telemetry(
     latency = np.clip(latency, 0.5, None)
 
     packet_loss = np.zeros(rows)
-    high_load = traffic > np.quantile(traffic, 0.85)
-    packet_loss[high_load] += 0.2 + 2.3 * normalized[high_load]
+    high_load = traffic > np.quantile(traffic, 0.88)
+    burst_mask = np.zeros(rows, dtype=bool)
+    burst_mask[burst_idx] = True
+    coupled_spikes = high_load | burst_mask
+    packet_loss[coupled_spikes] += 0.2 + 2.3 * normalized[coupled_spikes]
     if augment:
-        packet_loss += np.clip(rng.normal(0.04, 0.03, rows), 0, None)
+        packet_loss += np.clip(rng.normal(0.015, 0.015, rows), 0, None)
         packet_loss[burst_idx] += rng.uniform(0.8, 5.5, len(burst_idx))
     packet_loss = np.clip(packet_loss, 0.0, 100.0)
 
@@ -162,17 +168,19 @@ def build_telemetry(
             "source": f"kaggle-flow-converted:{DATASET}:{source_label}",
         }
     )
+    telemetry["traffic_delta"] = telemetry["traffic_mbps"].diff().fillna(0.0).round(3)
+    telemetry["latency_delta"] = telemetry["latency_ms"].diff().fillna(0.0).round(3)
     return telemetry
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default="telemetry.csv", help="CSV path to write.")
-    parser.add_argument("--rows", type=int, default=720, help="Telemetry rows to generate.")
+    parser.add_argument("--rows", type=int, default=8000, help="Telemetry rows to generate.")
     parser.add_argument("--file-path", default=DEFAULT_FILE, help="Kaggle file path to load.")
     parser.add_argument("--seed", type=int, default=None, help="Optional reproducible seed.")
-    parser.add_argument("--l-ipn", type=int, default=None, help="Optional local workstation ID to use. Defaults to all local workstations.")
-    parser.add_argument("--augment", action="store_true", help="Add random scaling, jitter, and bursts.")
+    parser.add_argument("--l-ipn", type=int, default=None, help="Optional local workstation ID to use. Defaults to the most active workstation.")
+    parser.add_argument("--augment", action=argparse.BooleanOptionalAction, default=True, help="Add random scaling, jitter, and coupled bursts.")
     return parser.parse_args()
 
 
@@ -183,8 +191,15 @@ def main() -> None:
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     telemetry.to_csv(output, index=False)
+    thresholds = {
+        feature: float(np.quantile(telemetry[feature].to_numpy(dtype=float), 0.90))
+        for feature in FEATURES
+    }
+    sidecar = output.with_suffix(".spike_thresholds.json")
+    sidecar.write_text(json.dumps({"spike_thresholds": thresholds, "quantile": 0.90}, indent=2), encoding="utf-8")
     print(f"Loaded Kaggle dataset {DATASET}")
     print(f"Generated {len(telemetry)} telemetry rows -> {output}")
+    print(f"Saved spike threshold sidecar -> {sidecar}")
     print(telemetry[FEATURES].describe().round(3).to_string())
 
 

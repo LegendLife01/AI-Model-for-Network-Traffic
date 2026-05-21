@@ -6,3 +6,4 @@ torch>=2.0
 onnx>=1.16
 onnxscript>=0.1
 kagglehub[pandas-datasets]>=0.3
+pytest>=8.0

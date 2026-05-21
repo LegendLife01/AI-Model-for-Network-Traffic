@@ -4,6 +4,7 @@ param(
     [int]$Samples = 720,
     [int]$Interval = 1,
     [int]$Epochs = 130,
+    [int]$LIpn = -1,
     [switch]$SkipInstall
 )
 
@@ -146,9 +147,13 @@ function Show-RunArtifacts($RunDir) {
     Write-Host "  $RunDir"
 }
 
-function Invoke-KaggleTelemetry($Python, $OutputCsv, $Rows) {
+function Invoke-KaggleTelemetry($Python, $OutputCsv, $Rows, $LIpn) {
+    $args = @("load_kaggle_data.py", "--rows", $Rows, "--output", $OutputCsv, "--augment", "--seed", "42")
+    if ($LIpn -ge 0) {
+        $args += @("--l-ipn", $LIpn)
+    }
     Push-Location $MlDir
-    & $Python load_kaggle_data.py --rows $Rows --output $OutputCsv
+    & $Python @args
     $windowsExit = $LASTEXITCODE
     Pop-Location
     if ($windowsExit -eq 0) {
@@ -158,7 +163,8 @@ function Invoke-KaggleTelemetry($Python, $OutputCsv, $Rows) {
     Log-Step "Windows Kaggle load failed; trying WSL virtual environment"
     $wslProject = ConvertTo-WslPath $ProjectDir
     $wslOutputCsv = ConvertTo-WslPath $OutputCsv
-    Invoke-WslBash "cd '$wslProject' && if [ ! -x .venv-kaggle/bin/python ]; then python3 -m venv .venv-kaggle; fi && .venv-kaggle/bin/python -c 'import kagglehub' 2>/dev/null || .venv-kaggle/bin/python -m pip install 'kagglehub[pandas-datasets]' && .venv-kaggle/bin/python ml/load_kaggle_data.py --rows $Rows --output '$wslOutputCsv'"
+    $wslLIpn = if ($LIpn -ge 0) { "--l-ipn $LIpn" } else { "" }
+    Invoke-WslBash "cd '$wslProject' && if [ ! -x .venv-kaggle/bin/python ]; then python3 -m venv .venv-kaggle; fi && .venv-kaggle/bin/python -c 'import kagglehub' 2>/dev/null || .venv-kaggle/bin/python -m pip install 'kagglehub[pandas-datasets]' && .venv-kaggle/bin/python ml/load_kaggle_data.py --rows $Rows --output '$wslOutputCsv' --augment --seed 42 $wslLIpn"
 }
 
 $NeedsPython = $Mode -in @("synthetic", "kaggle", "kaggle_opt", "dataset_opt", "simulate", "live", "train", "visualize")
@@ -183,7 +189,8 @@ switch ($Mode) {
     "kaggle" {
         New-RunFolder $RunDir
         Log-Step "Loading Kaggle network telemetry"
-        Invoke-KaggleTelemetry $Python $DataFile $Samples
+        if ($Samples -eq 720) { $Samples = 8000 }
+        Invoke-KaggleTelemetry $Python $DataFile $Samples $LIpn
         Invoke-ModelPipeline $Python $DataFile $RunDir
     }
 
@@ -191,7 +198,8 @@ switch ($Mode) {
         New-RunFolder $RunDir
         if ($Mode -eq "kaggle_opt") {
             Log-Step "Loading Kaggle network telemetry"
-            Invoke-KaggleTelemetry $Python $DataFile $Samples
+            if ($Samples -eq 720) { $Samples = 8000 }
+            Invoke-KaggleTelemetry $Python $DataFile $Samples $LIpn
         } else {
             $sourceData = Join-Path $ProjectDir "ml\telemetry.csv"
             if (-not (Test-Path $sourceData)) {

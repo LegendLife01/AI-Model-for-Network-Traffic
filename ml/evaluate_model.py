@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from enhanced_train import EnhancedMultivariateTrafficLSTM, StackedHybridLSTM
+from metrics_utils import feature_quality, quality_score_v2, spike_thresholds_from_quantile
 from train_model import FEATURES, MultivariateTrafficLSTM
 from run_layout import artifact_path, ensure_run_layout, find_artifact
 
@@ -41,6 +43,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-dir", required=True, help="Run folder containing model artifacts.")
     parser.add_argument("--output", default="model_evaluation_dashboard.png", help="Dashboard PNG name.")
     parser.add_argument("--benchmark-repeats", type=int, default=80, help="Inference benchmark repeats.")
+    parser.add_argument("--spike-quantile", type=float, default=0.90, help="Training quantile used for spike thresholds when none are saved.")
+    parser.add_argument("--export-docs", action="store_true", help="Copy evaluation artifacts to docs/results and docs/images.")
+    parser.add_argument("--docs-prefix", default="", help="Optional prefix for exported docs artifact names, such as kaggle_ or synthetic_.")
     return parser.parse_args()
 
 
@@ -161,6 +166,7 @@ def summarize_baselines(
 ) -> pd.DataFrame:
     rows = []
     methods = {"Model": predictions, **baselines}
+    persistence_metrics = regression_metrics(actuals, baselines.get("Persistence", persistence_baseline(actuals)))
     for method, values in methods.items():
         method_metrics = regression_metrics(actuals, values)
         quality_values = []
@@ -172,22 +178,18 @@ def summarize_baselines(
         for idx, feature in enumerate(FEATURES):
             if spike_df is not None and feature in spike_df.index:
                 spike_row = spike_df.loc[feature]
-                spike_score = spike_quality(
-                    int(spike_row["actual_spikes"]),
-                    int(spike_row["predicted_spikes"]),
-                    float(spike_row["precision"]),
-                    float(spike_row["recall"]),
-                    float(spike_row["f1"]),
-                    len(actuals),
-                )
+                spike_f1 = float(spike_row["f1"])
             else:
-                spike_score = 0.5
-            error_score = normalized_error_score(
-                method_metrics[feature]["mae"],
-                method_metrics[feature]["rmse"],
-                method_metrics[feature]["data_range"],
+                spike_f1 = 0.0
+            quality_values.append(
+                feature_quality(
+                    method_metrics[feature]["mae"],
+                    persistence_metrics[feature]["mae"],
+                    method_metrics[feature]["r2"],
+                    spike_f1,
+                    int(spike_df.loc[feature]["actual_spikes"]) if spike_df is not None and feature in spike_df.index else 0,
+                )
             )
-            quality_values.append(enterprise_quality_pct(error_score, spike_score))
 
         rows.append(
             {
@@ -206,18 +208,20 @@ def spike_analysis(
     predictions: np.ndarray,
     telemetry: pd.DataFrame,
     metrics_json: dict,
+    spike_quantile: float = 0.90,
 ) -> pd.DataFrame:
     rows = []
     saved_thresholds = metrics_json.get("training", {}).get("spike_thresholds", {})
     train_row_count = max(1, len(telemetry) - len(actuals))
+    train_values = telemetry[FEATURES].dropna().to_numpy(dtype=float)[:train_row_count]
+    quantile_thresholds = spike_thresholds_from_quantile(train_values, spike_quantile)
     for idx, feature in enumerate(FEATURES):
         if feature in saved_thresholds:
             threshold = float(saved_thresholds[feature])
             threshold_source = "training_metrics"
         else:
-            values = telemetry[feature].dropna().to_numpy(dtype=float)[:train_row_count]
-            threshold = float(values.mean() + 1.2 * values.std(ddof=0))
-            threshold_source = "training_window"
+            threshold = float(quantile_thresholds[feature])
+            threshold_source = f"training_quantile_{spike_quantile:.2f}"
         actual_spikes = actuals[:, idx] > threshold
         predicted_spikes = predictions[:, idx] > threshold
         true_positive = int(np.logical_and(actual_spikes, predicted_spikes).sum())
@@ -290,7 +294,7 @@ def benchmark_model(run_dir: Path, metrics_json: dict, test_rows: int, repeats: 
         model = StackedHybridLSTM(input_feature_count, hidden_size, layers, len(FEATURES))
     else:
         model = MultivariateTrafficLSTM(input_feature_count, hidden_size, layers, len(FEATURES))
-    model.load_state_dict(torch.load(model_path, map_location="cpu"))
+    model.load_state_dict(torch.load(model_path, map_location="cpu"), strict=False)
     model.eval()
 
     batch_size = max(1, min(128, test_rows))
@@ -377,11 +381,11 @@ def main() -> None:
     }
     model_metrics = regression_metrics(actuals, predictions)
     baseline_metrics = regression_metrics(actuals, baseline)
-    spikes = spike_analysis(actuals, predictions, telemetry, metrics_json)
+    spikes = spike_analysis(actuals, predictions, telemetry, metrics_json, args.spike_quantile)
     baseline_spikes = {
         "Model": spikes,
-        "Persistence": spike_analysis(actuals, baseline, telemetry, metrics_json),
-        "Moving Average": spike_analysis(actuals, moving_avg, telemetry, metrics_json),
+        "Persistence": spike_analysis(actuals, baseline, telemetry, metrics_json, args.spike_quantile),
+        "Moving Average": spike_analysis(actuals, moving_avg, telemetry, metrics_json, args.spike_quantile),
     }
     comparison = summarize_metrics(model_metrics, baseline_metrics, spikes, len(actuals))
     baseline_comparison = summarize_baselines(actuals, predictions, baselines, baseline_spikes)
@@ -398,10 +402,36 @@ def main() -> None:
         "note": "Binary model files are expected to look unreadable in a text editor. Use the JSON/CSV artifacts for inspection.",
     }
 
-    overall_quality = float(comparison["quality_pct"].mean())
+    per_feature_quality = {
+        row["metric"]: {
+            "model_mae": float(row["model_mae"]),
+            "baseline_mae": float(row["baseline_mae"]),
+            "r2": float(row["model_r2"]),
+            "spike_f1": float(spikes.set_index("metric").loc[row["metric"], "f1"]),
+            "actual_spikes": int(spikes.set_index("metric").loc[row["metric"], "actual_spikes"]),
+            "quality_pct": float(row["quality_pct"]),
+        }
+        for row in comparison.to_dict(orient="records")
+    }
+    weights = {"traffic_mbps": 0.50, "latency_ms": 0.25, "packet_loss_pct": 0.25}
+    overall_quality = float(
+        sum(weights[feature] * per_feature_quality[feature]["quality_pct"] for feature in FEATURES) / sum(weights.values())
+    )
     avg_improvement = float(comparison["mae_improvement_pct"].mean())
     final_loss = float(losses["mse_loss"].iloc[-1]) if "mse_loss" in losses else 0.0
     epochs = int(metrics_json.get("training", {}).get("epochs", len(losses)))
+
+    model_baseline_quality = float(baseline_comparison.loc[baseline_comparison["method"] == "Model", "quality_pct"].iloc[0])
+    persistence_quality = float(baseline_comparison.loc[baseline_comparison["method"] == "Persistence", "quality_pct"].iloc[0])
+    traffic_spike = spikes.set_index("metric").loc["traffic_mbps"]
+    gates = {
+        "quality_ge_90": overall_quality >= 90.0,
+        "mae_improvement_ge_15": avg_improvement >= 15.0,
+        "beats_persistence_each_feature_mae": bool((comparison["mae_improvement_pct"] > 0).all()),
+        "traffic_spike_f1_ge_0_50": float(traffic_spike["f1"]) >= 0.50,
+        "traffic_predicted_spikes_ge_5": int(traffic_spike["predicted_spikes"]) >= 5,
+        "model_quality_gt_persistence": model_baseline_quality > persistence_quality,
+    }
 
     evaluation = {
         "overall": {
@@ -412,6 +442,8 @@ def main() -> None:
             "rows": int(len(telemetry)),
             "test_samples": int(len(actuals)),
         },
+        "per_feature": comparison.to_dict(orient="records"),
+        "gates_passed": gates,
         "benchmark": benchmark,
         "baseline_comparison": baseline_comparison.to_dict(orient="records"),
         "notes": {
@@ -570,6 +602,18 @@ def main() -> None:
     print(f"Evaluation dashboard saved -> {output_path}")
     print(f"Evaluation summary saved -> {artifact_path(run_dir, 'evaluation_summary.json', 'json')}")
     print(f"Model metadata saved -> {artifact_path(run_dir, 'model_metadata.json', 'json')}")
+    if args.export_docs:
+        docs_root = Path(__file__).resolve().parents[1] / "docs"
+        docs_images = docs_root / "images"
+        docs_results = docs_root / "results"
+        docs_images.mkdir(parents=True, exist_ok=True)
+        docs_results.mkdir(parents=True, exist_ok=True)
+        prefix = args.docs_prefix
+        shutil.copy2(output_path, docs_images / f"{prefix}model_evaluation_dashboard.png")
+        for name in ("evaluation_summary.json",):
+            shutil.copy2(artifact_path(run_dir, name, "json"), docs_results / f"{prefix}{name}")
+        for name in ("evaluation_comparison.csv", "evaluation_baselines.csv", "evaluation_spikes.csv"):
+            shutil.copy2(artifact_path(run_dir, name, "results"), docs_results / f"{prefix}{name}")
 
 
 if __name__ == "__main__":
