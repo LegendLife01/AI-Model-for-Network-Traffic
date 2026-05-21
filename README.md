@@ -1,28 +1,46 @@
 # AI-Driven Network Design and Traffic Prediction
 
-This project combines a ContainerLab spine-leaf fabric with an LSTM telemetry
-pipeline. It can run fully offline with synthetic telemetry, or collect live
-traffic, latency, and packet-loss data from deployed ContainerLab nodes.
+This project builds a network telemetry prediction pipeline around synthetic,
+Kaggle, and live ContainerLab data. The current default trainer is a hybrid
+ensemble: a lightweight LSTM learns temporal sequence behavior, while Gradient
+Boosting learns engineered lag, rolling-window, and spike features. The two
+models are blended into one forecast for traffic, latency, and packet loss.
+
+The pipeline can run fully offline with synthetic telemetry, train from a local
+CSV, pull a Kaggle network dataset, or collect live telemetry from a deployed
+ContainerLab spine-leaf topology.
 
 ## What Is Included
 
-- ContainerLab topology: 2 spines, 4 leaves, and a telemetry utility container.
-- FRRouting BGP configs for a routed spine-leaf fabric.
-- Live telemetry collector that uses Docker exec and ping from the host.
-- Synthetic telemetry generator for development without Docker/ContainerLab.
-- Multivariate LSTM that predicts traffic, latency, and packet loss together.
-- Dashboard with forecasts, errors, correlations, and spike detection.
+- Synthetic telemetry generator for offline trials.
+- Kaggle loader for `crawford/computer-network-traffic`.
+- Live ContainerLab collector for traffic, latency, and packet loss.
+- Hybrid ensemble trainer in `ml/enhanced_train.py`.
+- Original LSTM trainer in `ml/train_model.py` kept as a reference.
+- Dataset-optimized tree trainer in `ml/train_kaggle_model.py`.
+- ONNX export for the LSTM component.
+- Dashboards for forecasts, training loss, errors, correlations, and spikes.
+- Model evaluation reports, readable summaries, and baseline comparisons.
 
-## Training Defaults
+## Current Default Model
 
-- Lookback sequence length: `48`
-- Hidden size: `128`
-- LSTM layers: `2`
-- Epochs: `130`
-- Packet loss transform: `log1p` during training, `expm1` after prediction
-- Spike-weighted loss: training quantile `0.90`, spike weight `4.0`
-- Early stopping: off by default so training runs through all requested epochs
-- Dataset optimized trainer: early-stopped Gradient Boosting, no spike oversampling by default
+`run.ps1 synthetic`, `run.ps1 kaggle`, `run.ps1 live`, and `run.ps1 train`
+currently call `ml/enhanced_train.py`.
+
+That trainer creates:
+
+- `model/lstm_model.pth`: PyTorch LSTM sequence model.
+- `model/lstm_model.onnx`: ONNX export of the LSTM component.
+- `model/gb_model.joblib`: Gradient Boosting spike/tabular component.
+- `results/predictions.csv`: blended ensemble predictions.
+- `results/actuals.csv`: matching actual values.
+- `results/train_losses.csv`: LSTM training and validation losses.
+- `json/metrics.json`: training settings and model metrics.
+- `json/scaler_params.json`: input and target scaler metadata.
+
+The ensemble weights default to `65%` Gradient Boosting and `35%` LSTM. This
+leans on Gradient Boosting for spike capture while still using the LSTM for
+time-window behavior.
 
 ## Project Layout
 
@@ -31,65 +49,98 @@ ai_network_project/
   containerlab/topology.clab.yml
   configs/frr/*/frr.conf
   scripts/collect_telemetry.py
+  scripts/cleanup_runs.py
   ml/generate_data.py
+  ml/enhanced_train.py
   ml/train_model.py
+  ml/train_kaggle_model.py
+  ml/load_kaggle_data.py
   ml/visualize.py
+  ml/evaluate_model.py
+  ml/export_model_report.py
+  run.ps1
   run.sh
   requirements.txt
 ```
 
-## Quick Start Without ContainerLab
+## Setup
 
-```bash
-bash run.sh synthetic --samples 720 --epochs 130
-```
-
-On Windows PowerShell, use the native runner instead:
+From PowerShell:
 
 ```powershell
+cd "C:\Users\siddh\Downloads\ai_network_project (1)\ai_network_project"
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\run.ps1 synthetic -Samples 720 -Epochs 130
+python -m pip install -r requirements.txt
 ```
 
-To train from the Kaggle `crawford/computer-network-traffic` dataset:
+If pip has certificate issues on Windows, install the ONNX exporter dependency
+with trusted PyPI hosts:
 
 ```powershell
-.\run.ps1 kaggle -Samples 720 -Epochs 130
+python -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org onnxscript
 ```
 
-For best spike prediction on dataset-style telemetry, use the optimized dataset
-trainer:
+## Quick Trials
+
+Synthetic trial with 2000 generated samples and 40 LSTM epochs:
 
 ```powershell
-.\run.ps1 kaggle_opt -Samples 5000 -SkipInstall
+.\run.ps1 synthetic -Samples 2000 -Epochs 40
 ```
 
-For any other telemetry dataset, save it as `ml/telemetry.csv` with columns
-`timestamp`, `traffic_mbps`, `latency_ms`, and `packet_loss_pct`, then run:
+Kaggle trial with 5000 rows and 60 epochs:
 
 ```powershell
-.\run.ps1 dataset_opt -SkipInstall
+.\run.ps1 kaggle -Samples 5000 -Epochs 60
 ```
 
-Each Kaggle run creates a new `runs/<timestamp>_kaggle/` folder and preserves
-chronological order for valid time-series training. If no seed is supplied, the
-loader can choose a different chronological slice each run. Optional
-augmentation is available in `ml/load_kaggle_data.py`.
-
-Every run creates its own folder under `runs/`, for example
-`runs/20260519_154500_synthetic/`. The folder contains that run's
-raw telemetry, model artifacts, CSV results, metrics, spike summary, and
-dashboard images.
-
-To train from an existing `ml/telemetry.csv` and store the result in a new
-run folder:
+Fast smoke test:
 
 ```powershell
-.\run.ps1 train -Epochs 130
-.\run.ps1 visualize
+.\run.ps1 synthetic -Samples 300 -Epochs 3
 ```
 
-Outputs are written to subfolders inside each run folder:
+Skip dependency installation after packages are already installed:
+
+```powershell
+.\run.ps1 synthetic -Samples 2000 -Epochs 40 -SkipInstall
+```
+
+Every run creates a timestamped folder under `runs/`, for example:
+
+```text
+runs/20260521_103546_synthetic/
+```
+
+The `runs/` folder is ignored by git because it can contain large generated
+models, images, and experiment outputs.
+
+## Training From Local Telemetry
+
+Save a CSV at `ml/telemetry.csv` with these columns:
+
+```text
+timestamp,traffic_mbps,latency_ms,packet_loss_pct
+```
+
+Then run:
+
+```powershell
+.\run.ps1 train -Epochs 80
+```
+
+Manual equivalent:
+
+```powershell
+python ml\enhanced_train.py --data ml\telemetry.csv --output-dir runs\hybrid_manual --epochs 80
+python ml\visualize.py --data runs\hybrid_manual\raw_data\telemetry.csv --output-dir runs\hybrid_manual --sensitivity 1.3
+python ml\evaluate_model.py --run-dir runs\hybrid_manual
+python ml\export_model_report.py --run-dir runs\hybrid_manual
+```
+
+## Outputs
+
+Each complete run contains:
 
 - `raw_data/telemetry.csv`
 - `results/predictions.csv`
@@ -107,105 +158,118 @@ Outputs are written to subfolders inside each run folder:
 - `images/traffic_prediction_dashboard.png`
 - `images/model_evaluation_dashboard.png`
 - `model/lstm_model.pth`
-- `model/dataset_model.joblib` for optimized dataset runs
+- `model/lstm_model.onnx`
+- `model/gb_model.joblib`
 - `model/model_readable_report.md`
 - `model/model_weights_summary.csv`
 - `model/model_gate_summary.csv`
 
-`model/lstm_model.pth` and `model/dataset_model.joblib` are binary model files.
-They will look unreadable in a text editor by design. Use
-`model_readable_report.md`, `model_readable_summary.json`, `model_metadata.json`,
-`metrics.json`, and the CSV files for human-readable inspection.
+Binary files such as `.pth`, `.onnx`, and `.joblib` are not meant to be read in
+a text editor. Use the JSON, CSV, dashboard PNGs, and Markdown report for
+inspection.
 
-## Install Tools From Terminal
+## Model Notes
 
-On Windows PowerShell, run:
+The hybrid trainer uses:
+
+- LSTM lookback sequence length: `48`
+- LSTM hidden size: `128`
+- LSTM layers: `2`
+- LSTM epochs: controlled by `-Epochs` or `--epochs`
+- Gradient Boosting estimators: `300`
+- Gradient Boosting learning rate: `0.05`
+- Gradient Boosting max depth: `5`
+- Ensemble weights: `0.65` Gradient Boosting, `0.35` LSTM
+- Packet loss transform: `log1p` during neural training, `expm1` after neural prediction
+
+The dashboard spike thresholds are computed as:
+
+```text
+training mean + sensitivity * training standard deviation
+```
+
+Change sensitivity when visualizing:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\scripts\setup_windows.ps1
+python ml\visualize.py --data runs\hybrid_manual\raw_data\telemetry.csv --output-dir runs\hybrid_manual --sensitivity 1.3
 ```
 
-That installs Python, Git, Docker Desktop, WSL Ubuntu, and Python packages using
-`winget` where possible. After WSL/Ubuntu is ready, open Ubuntu and run this from
-the project folder:
+## Kaggle And Dataset Modes
 
-```bash
-bash scripts/setup_wsl_containerlab.sh
-```
-
-If you only want the ML pipeline and not ContainerLab, run:
+Standard Kaggle hybrid run:
 
 ```powershell
-.\scripts\setup_windows.ps1 -SkipDocker -SkipWsl
+.\run.ps1 kaggle -Samples 5000 -Epochs 60
 ```
+
+Dataset-optimized Gradient Boosting-only run:
+
+```powershell
+.\run.ps1 kaggle_opt -Samples 5000 -SkipInstall
+```
+
+For an arbitrary local CSV:
+
+```powershell
+.\run.ps1 dataset_opt -SkipInstall
+```
+
+`dataset_opt` expects `ml/telemetry.csv` to exist.
 
 ## Live ContainerLab Workflow
 
-ContainerLab is Linux-focused. On Windows, run this from WSL2, a Linux VM, or a
-Linux host with Docker and ContainerLab installed.
+ContainerLab is Linux-focused. On Windows, use WSL2, a Linux VM, or a Linux host
+with Docker and ContainerLab installed.
 
-From a VS Code PowerShell terminal on Windows, `run.ps1` can call WSL for the
-ContainerLab deploy/destroy steps and then run the ML pipeline locally:
+From PowerShell:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\run.ps1 deploy
-.\run.ps1 live -Samples 120 -Interval 10 -Epochs 130
+.\run.ps1 live -Samples 120 -Interval 10 -Epochs 80
 .\run.ps1 destroy
 ```
 
-Use this flow after running:
-
-```powershell
-.\scripts\setup_windows.ps1
-```
-
-Then open Ubuntu once and run:
-
-```bash
-bash scripts/setup_wsl_containerlab.sh
-```
-
-The `live` mode writes ContainerLab telemetry to a new `runs/<timestamp>_live/`
-folder, trains the LSTM, and creates the dashboard in that same folder.
+From Linux or WSL:
 
 ```bash
 bash run.sh deploy
-bash run.sh live --samples 120 --interval 10 --epochs 130
+bash run.sh live --samples 120 --interval 10 --epochs 80
 bash run.sh destroy
 ```
 
 The live collector:
 
-1. Verifies the `clab-ai-traffic-lab-*` containers are running.
+1. Checks for running `clab-ai-traffic-lab-*` containers.
 2. Reads interface byte counters from `/proc/net/dev`.
-3. Sends ping probes across the leaf/spine fabric to create measurable traffic.
-4. Measures latency and packet loss from the router containers.
-5. Writes LSTM-ready rows to a timestamped folder under `runs/`.
+3. Sends ping probes to create measurable traffic.
+4. Measures latency and packet loss.
+5. Writes run-ready telemetry into `runs/<timestamp>_live/raw_data/telemetry.csv`.
 
-## Manual Commands
+## Troubleshooting
 
-```bash
-python -m pip install -r requirements.txt
+If PowerShell blocks scripts:
 
-cd ml
-python generate_data.py --hours 720 --seed 7 --output ../runs/manual/raw_data/telemetry.csv
-python train_model.py --data ../runs/manual/raw_data/telemetry.csv --epochs 130 --output-dir ../runs/manual
-python visualize.py --data ../runs/manual/raw_data/telemetry.csv --output-dir ../runs/manual
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
-For live collection after deploying ContainerLab:
+If ONNX export fails with `ModuleNotFoundError: No module named 'onnxscript'`:
 
-```bash
-python scripts/collect_telemetry.py --mode live --samples 120 --interval 10 --output-root runs
+```powershell
+python -m pip install onnx onnxscript
 ```
 
-## Notes
+If pip has certificate errors:
 
-- The collector is intentionally host-run because the host has Docker access.
-- Synthetic mode is still useful for demos, model iteration, and environments
-  without ContainerLab.
-- Dashboard spike thresholds are calculated from the training portion as
-  `mean + sensitivity * std` and can be changed with
-  `python visualize.py --sensitivity 2.5`.
+```powershell
+python -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org onnx onnxscript
+```
+
+If a run fails after training but before dashboards, rerun the last steps on the
+same run folder:
+
+```powershell
+python ml\visualize.py --data runs\<run_folder>\raw_data\telemetry.csv --output-dir runs\<run_folder>
+python ml\evaluate_model.py --run-dir runs\<run_folder>
+python ml\export_model_report.py --run-dir runs\<run_folder>
+```
