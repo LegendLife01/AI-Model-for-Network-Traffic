@@ -3,6 +3,7 @@ __pycache__/
 *.npy
 .venv/
 .venv-kaggle/
+.pytest_deps/
 venv/
 
 ml/*.pth
