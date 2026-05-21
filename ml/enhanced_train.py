@@ -1,4 +1,4 @@
-"""Stable Enhanced LSTM - good balance of spike reactivity."""
+"""Best Balanced Enhanced Model - v3."""
 
 from __future__ import annotations
 
@@ -27,11 +27,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 class EnhancedMultivariateTrafficLSTM(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int = 128, num_layers: int = 2, output_size: int = 3, dropout: float = 0.15):
+    def __init__(self, input_size: int, hidden_size: int = 192, num_layers: int = 2, output_size: int = 3, dropout: float = 0.1):
         super().__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0.0)
-        self.attention = nn.Sequential(nn.Linear(hidden_size, 32), nn.Tanh(), nn.Linear(32, 1))
-        self.head = nn.Sequential(nn.Linear(hidden_size, 64), nn.ReLU(), nn.Dropout(dropout), nn.Linear(64, output_size))
+        self.attention = nn.Sequential(nn.Linear(hidden_size, 48), nn.Tanh(), nn.Linear(48, 1))
+        self.head = nn.Sequential(nn.Linear(hidden_size, 96), nn.ReLU(), nn.Dropout(dropout), nn.Linear(96, output_size))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         lstm_out, _ = self.lstm(x)
@@ -41,7 +41,7 @@ class EnhancedMultivariateTrafficLSTM(nn.Module):
 
 
 class SpikeWeightedLoss(nn.Module):
-    def __init__(self, thresholds: torch.Tensor, spike_weight: float = 4.5, focal_gamma: float = 0.8):
+    def __init__(self, thresholds: torch.Tensor, spike_weight: float = 5.0, focal_gamma: float = 0.5):
         super().__init__()
         self.register_buffer("thresholds", thresholds)
         self.spike_weight = spike_weight
@@ -57,19 +57,19 @@ class SpikeWeightedLoss(nn.Module):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", default="ml/telemetry.csv")
-    parser.add_argument("--sequence-length", type=int, default=48)
-    parser.add_argument("--hidden-size", type=int, default=128)
+    parser.add_argument("--sequence-length", type=int, default=60)
+    parser.add_argument("--hidden-size", type=int, default=192)
     parser.add_argument("--layers", type=int, default=2)
-    parser.add_argument("--epochs", type=int, default=120)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=0.0008)
-    parser.add_argument("--spike-quantile", type=float, default=0.88)
-    parser.add_argument("--spike-weight", type=float, default=4.5)
-    parser.add_argument("--focal-gamma", type=float, default=0.8)
-    parser.add_argument("--train-split", type=float, default=0.8)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--spike-quantile", type=float, default=0.87)
+    parser.add_argument("--spike-weight", type=float, default=5.0)
+    parser.add_argument("--focal-gamma", type=float, default=0.5)
+    parser.add_argument("--train-split", type=float, default=0.82)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default="lstm_model.pth")
-    parser.add_argument("--output-dir", default="runs/stable_enhanced")
+    parser.add_argument("--output-dir", default="runs/best_stable")
     return parser.parse_args()
 
 
@@ -123,7 +123,7 @@ def main() -> None:
     criterion = SpikeWeightedLoss(spike_thresholds, args.spike_weight, args.focal_gamma)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
-    print("Training Stable Enhanced Model...")
+    print("Training Best Stable Enhanced Model...")
     best_state = copy.deepcopy(model.state_dict())
     best_val = float("inf")
     best_epoch = 0
@@ -163,7 +163,7 @@ def main() -> None:
                 "learning_rate": float(optimizer.param_groups[0]["lr"]),
             }
         )
-        if (epoch + 1) % 30 == 0 or epoch == 0 or epoch == args.epochs - 1:
+        if (epoch + 1) % 25 == 0 or epoch == 0 or epoch == args.epochs - 1:
             print(f"Epoch {epoch + 1:3d} | Val Loss: {val_loss:.4f}")
 
     model.load_state_dict(best_state)
@@ -177,7 +177,7 @@ def main() -> None:
 
     metrics = {
         "training": {
-            "loss": "StableEnhancedSpikeWeightedLoss",
+            "loss": "BestStableEnhancedSpikeWeightedLoss",
             "feature_columns": feature_columns,
             "output_features": FEATURES,
             "spike_quantile": args.spike_quantile,
@@ -230,8 +230,8 @@ def main() -> None:
     if data_path.resolve() != raw_copy.resolve():
         shutil.copy2(data_path, raw_copy)
 
-    print(f"\nStable Enhanced Model Done -> {output_dir}")
-    print("This version should be much better balanced.")
+    print(f"\nBest Stable Model Complete -> {output_dir}")
+    print("Run visualize.py and evaluate_model.py now.")
 
 
 if __name__ == "__main__":
