@@ -1,230 +1,36 @@
-# AI-Driven Network Design and Traffic Prediction
+# NetPulse
 
-This project builds a network telemetry prediction pipeline around synthetic,
-Kaggle, and live ContainerLab data. The current default trainer is a hybrid
-ensemble: a stacked LSTM learns temporal sequence behavior, while Gradient
-Boosting learns engineered lag, rolling-window, and spike features. The two
-models are blended into one forecast for traffic, latency, and packet loss.
+AI-powered network telemetry forecasting for traffic, latency, and packet loss.
 
-The pipeline can run fully offline with synthetic telemetry, train from a local
-CSV, pull a Kaggle network dataset, or collect live telemetry from a deployed
-ContainerLab spine-leaf topology.
+NetPulse turns telemetry CSVs, synthetic trials, Kaggle flow data, and live
+ContainerLab samples into reproducible forecasting runs with dashboards,
+baseline comparisons, spike metrics, and model artifacts.
 
-## What Is Included
+## Highlights
 
-- Synthetic telemetry generator for offline trials.
-- Kaggle loader for `crawford/computer-network-traffic`.
-- Live ContainerLab collector for traffic, latency, and packet loss.
-- Hybrid ensemble trainer in `ml/enhanced_train.py`.
-- Original LSTM trainer in `ml/train_model.py` kept as a reference.
-- Dataset-optimized tree trainer in `ml/train_kaggle_model.py`.
-- ONNX export for the LSTM component.
-- Dashboards for forecasts, training loss, errors, correlations, and spikes.
-- Model evaluation reports, readable summaries, and baseline comparisons.
-
-## Current Default Model
-
-`run.ps1 synthetic`, `run.ps1 kaggle`, `run.ps1 live`, and `run.ps1 train`
-currently call `ml/enhanced_train.py`.
-
-That trainer creates:
-
-- `model/lstm_model.pth`: PyTorch LSTM sequence model.
-- `model/lstm_model.onnx`: optional ONNX export of the LSTM component when `--export-onnx` is used and exporter dependencies are available.
-- `model/gb_model.joblib`: Gradient Boosting spike/tabular component.
-- `results/predictions.csv`: blended ensemble predictions.
-- `results/actuals.csv`: matching actual values.
-- `results/prediction_intervals.csv`: residual-based 95% forecast bands.
-- `results/train_losses.csv`: LSTM training and validation losses.
-- `json/metrics.json`: training settings and model metrics.
-- `json/scaler_params.json`: input and target scaler metadata.
-
-The trainer starts from `65%` Gradient Boosting and `35%` LSTM, then tunes the
-blend per target on a chronological validation slice. A final validation-tuned
-one-step persistence residual blend is also available inside the trainer. That
-residual branch is useful for next-step forecasting because the previous
-observed sample is known at inference time; it is not a claim that the model can
-see the current target.
-
-The current neural component is a stacked LSTM with temporal attention,
-LayerNorm, and a residual connection from the final hidden state.
-Older run metadata may contain `attention_lstm` or `hybrid_lstm_gradient_boosting`
-from earlier experiments, but new hybrid runs are labeled
-`hybrid_attention_lstm_gradient_boosting`.
-The trainer uses CUDA automatically when PyTorch can see a GPU, and otherwise
-falls back to CPU.
-
-## How The Pieces Connect
-
-The project has three main data paths:
-
-- Synthetic data: `ml/generate_data.py` creates offline telemetry for demos and
-  repeatable experiments.
-- Kaggle data: `ml/load_kaggle_data.py` loads external network traffic rows for
-  larger dataset-style trials.
-- Live data: `scripts/collect_telemetry.py` samples a running ContainerLab
-  topology.
-
-Those paths all produce the same core columns:
-
-```text
-timestamp,traffic_mbps,latency_ms,packet_loss_pct
-```
-
-The runner scripts connect the pipeline:
-
-- `run.ps1` is the main Windows entrypoint.
-- `run.sh` is the Linux/WSL entrypoint.
-- `ml/enhanced_train.py` trains the current hybrid model.
-- `ml/visualize.py` creates the prediction dashboard and spike summary.
-- `ml/evaluate_model.py` compares the model against simple baselines.
-- `ml/export_model_report.py` writes human-readable model summaries.
-- `ml/compare_sequence_models.py` runs controlled LSTM/GRU/attention ablations.
-- `ml/metrics_utils.py` centralizes quality, weighted MAE, and spike scoring helpers.
-
-Why each part matters:
-
-- The LSTM branch learns temporal sequence behavior from lookback windows.
-- The Gradient Boosting branch uses lag and rolling-window features that are
-  often strong for abrupt tabular spike patterns.
-- The ensemble weight search uses validation data to choose per-feature blends
-  instead of assuming one fixed weight is always best.
-- The persistence residual branch tests whether the learned model adds value
-  over a strong one-step baseline.
-- The dashboards make model behavior inspectable instead of hiding everything
-  behind one score.
-- The ablation runner helps prove whether attention or other sequence changes
-  actually help on the current dataset.
-
-## Current Limitations
-
-- The neural model has temporal attention, but it is not a Transformer or a
-  Temporal Fusion Transformer.
-- This is an experimentation pipeline, not a proven production deployment.
-- Quality depends on the dataset, split, spike frequency, and dashboard
-  sensitivity. Trust the generated evaluation artifacts for each run rather
-  than any fixed README quality claim.
-- Prediction intervals are residual-based approximations, not a full
-  probabilistic forecasting model.
-- The LSTM scalers are fit on the chronological training slice only; validation
-  and test windows are transformed with those fitted scalers.
-
-## Project Layout
-
-```text
-ai_network_project/
-  containerlab/topology.clab.yml
-  configs/frr/*/frr.conf
-  scripts/collect_telemetry.py
-  scripts/cleanup_runs.py
-  ml/generate_data.py
-  ml/enhanced_train.py
-  ml/train_model.py
-  ml/train_kaggle_model.py
-  ml/load_kaggle_data.py
-  ml/visualize.py
-  ml/evaluate_model.py
-  ml/export_model_report.py
-  run.ps1
-  run.sh
-  requirements.txt
-```
-
-## Setup
-
-From PowerShell:
-
-```powershell
-cd "C:\Users\siddh\Downloads\ai_network_project (1)\ai_network_project"
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-python -m pip install -r requirements.txt
-```
-
-If pip has certificate issues on Windows, install the ONNX exporter dependency
-with trusted PyPI hosts:
-
-```powershell
-python -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org onnxscript
-```
-
-## Quick Trials
-
-Universal benchmark loop for the current `ml/telemetry.csv`:
-
-```powershell
-.\run.ps1 benchmark -TargetQuality 90 -MaxAttempts 12
-```
-
-Synthetic trial with 2000 generated samples and 40 LSTM epochs:
-
-```powershell
-.\run.ps1 synthetic -Samples 2000 -Epochs 40
-```
-
-Kaggle trial with 5000 rows and 60 epochs:
-
-```powershell
-.\run.ps1 kaggle -Samples 5000 -Epochs 60
-```
-
-Fast smoke test:
-
-```powershell
-.\run.ps1 synthetic -Samples 300 -Epochs 3
-```
-
-Skip dependency installation after packages are already installed:
-
-```powershell
-.\run.ps1 synthetic -Samples 2000 -Epochs 40 -SkipInstall
-```
-
-## Sample End-To-End Trial
-
-This trial uses the checked-in sample data at `ml/telemetry.csv`, trains the
-hybrid model, creates graphs, and writes evaluation tables.
-
-```powershell
-python ml\enhanced_train.py --data ml\telemetry.csv --output-dir runs\sample_hybrid_trial --epochs 40 --device auto
-python ml\visualize.py --data runs\sample_hybrid_trial\raw_data\telemetry.csv --output-dir runs\sample_hybrid_trial --sensitivity 1.3
-python ml\evaluate_model.py --run-dir runs\sample_hybrid_trial
-python ml\export_model_report.py --run-dir runs\sample_hybrid_trial
-```
-
-Inspect these outputs:
-
-- Data used: `runs/sample_hybrid_trial/raw_data/telemetry.csv`
-- Prediction graph: `runs/sample_hybrid_trial/images/traffic_prediction_dashboard.png`
-- Evaluation graph: `runs/sample_hybrid_trial/images/model_evaluation_dashboard.png`
-- Metrics: `runs/sample_hybrid_trial/json/evaluation_summary.json`
-- Baseline comparison: `runs/sample_hybrid_trial/results/evaluation_baselines.csv`
-- Spike metrics: `runs/sample_hybrid_trial/results/evaluation_spikes.csv`
-- Prediction intervals: `runs/sample_hybrid_trial/results/prediction_intervals.csv`
-
-Do not treat one trial as proof of model superiority. Compare multiple runs and
-use the baseline/ablation outputs before making claims about improvement.
+- Forecasts `traffic_mbps`, `latency_ms`, and `packet_loss_pct` together.
+- Uses chronological time-series splits and train-only scaling.
+- Trains a hybrid attention-LSTM plus Gradient Boosting ensemble.
+- Compares results against persistence and moving-average baselines.
+- Tracks spike precision, recall, and F1 instead of only aggregate loss.
+- Produces dashboards, JSON summaries, CSV reports, model files, and readable
+  model reports for every complete run.
+- Includes synthetic, Kaggle, local CSV, and live ContainerLab workflows.
 
 ## Current Evidence
 
-The primary checked-in evidence run is the best measured 2000-row synthetic
-benchmark from the V4 self-learning loop. It reached `83.6%` normalized quality,
-beat the persistence baseline on every tracked KPI, and passed the traffic spike
-gate with `0.851` traffic spike F1. The secondary checked-in demo now uses the
-generic `ml/telemetry.csv` path instead of the older Kaggle converted-flow demo,
-because it better represents the repository's local reusable CSV workflow.
+The strongest checked-in evidence is a 2000-row synthetic benchmark from the V4
+self-learning loop. It is useful as a reproducible demo, not as a claim of
+production readiness.
 
-Synthetic command:
+| Dataset | Rows | Quality | MAE vs Persistence | Traffic Spike F1 | Status |
+|---|---:|---:|---:|---:|---|
+| Synthetic | 2000 | 83.6% | +25.2% | 0.851 | Best checked-in demo |
+| Generic `ml/telemetry.csv` | 3000 | 81.2% | +18.4% | 0.810 | Local CSV demo |
 
-```powershell
-python ml\generate_data.py --hours 2000 --output runs\v4_synthetic_input\raw_data\telemetry.csv --seed 7
-python ml\auto_benchmark.py --data runs\v4_synthetic_input\raw_data\telemetry.csv --output-dir runs\v4_syn --target-quality 90 --max-attempts 15 --sync-docs --docs-prefix synthetic_
-```
-
-Generic telemetry command:
-
-```powershell
-python ml\self_improve.py --data ml\telemetry.csv --output-dir runs\generic_self_continue --target-quality 90 --max-rounds 1 --attempts-per-round 4 --sync-docs --docs-prefix generic_
-```
+The requested `>=90%` quality gate was not reached by these measured evidence
+runs. The synthetic and generic demos do beat persistence on every tracked MAE
+target and pass the traffic spike F1 gate.
 
 Dashboard examples:
 
@@ -238,63 +44,129 @@ Dashboard examples:
 
 Tracked evidence files:
 
-- `docs/results/generic_evaluation_summary.json`
-- `docs/results/generic_evaluation_baselines.csv`
-- `docs/results/generic_evaluation_spikes.csv`
 - `docs/results/synthetic_evaluation_summary.json`
 - `docs/results/synthetic_evaluation_baselines.csv`
 - `docs/results/synthetic_evaluation_spikes.csv`
+- `docs/results/generic_evaluation_summary.json`
+- `docs/results/generic_evaluation_baselines.csv`
+- `docs/results/generic_evaluation_spikes.csv`
 - `docs/results/sequence_model_comparison.csv`
 
-Latest measured synthetic summary:
+## How It Works
 
-| Dataset | Rows | Epochs | Quality | MAE vs Persistence | Beats Persistence Every Feature | Traffic Spike F1 Gate |
-|---|---:|---:|---:|---:|---|---|
-| Synthetic | 2000 | 59 | 83.6% | +25.2% | Yes | Yes |
-| Generic telemetry | 3000 | 52 | 81.2% | +18.4% | Yes | Yes |
-
-Per-feature MAE from the 83.6% synthetic evidence run:
-
-| Dataset | Feature | Model MAE | Persistence MAE | MAE Gain |
-|---|---|---:|---:|---:|
-| Synthetic | Traffic | 8.401 | 12.522 | +32.9% |
-| Synthetic | Latency | 1.007 | 1.387 | +27.4% |
-| Synthetic | Packet loss | 0.353 | 0.416 | +15.3% |
-
-The requested `>=90%` quality target was not reached in these measured runs.
-The 83.6% synthetic run passes the concrete baseline and traffic-spike gates;
-the remaining failed gate is `quality_ge_90`. The best checked-in synthetic
-candidate was `hybrid_low_quantile` after 15 local V4 attempt folders. The
-generic `ml/telemetry.csv` demo reached `81.2%` normalized quality with `0.810`
-traffic spike F1. It also remains below the requested `>=90%` gate, so it is
-shown as supporting evidence rather than the headline result.
-
-The current sequence ablation smoke run from `ml/compare_sequence_models.py`
-used the synthetic 2000-row evidence data for 20 epochs and showed:
-
-| Model | Validation MSE | Test MAE | SMAPE | Spike F1 |
-|---|---:|---:|---:|---:|
-| Attention LSTM | 0.6385 | 3.9173 | 0.5097 | 0.3376 |
-| LSTM | 0.6545 | 3.7132 | 0.5071 | 0.3178 |
-| GRU | 0.6702 | 3.9089 | 0.5097 | 0.2866 |
-| Mean LSTM | 0.7512 | 5.3300 | 0.6033 | 0.1647 |
-
-This is why the project includes ablation tooling: attention had the best
-validation MSE in this run, but the plain LSTM had the best test MAE. That is a
-more credible story than claiming one architecture is always better.
-
-Every run creates a timestamped folder under `runs/`, for example:
+All data paths normalize into the same schema:
 
 ```text
-runs/20260521_103546_synthetic/
+timestamp,traffic_mbps,latency_ms,packet_loss_pct
 ```
 
-The `runs/` folder is ignored by git because it can contain large generated
-models, images, and experiment outputs.
+The pipeline then follows this flow:
 
-## Training From Local Telemetry
+```text
+telemetry CSV
+  -> feature transforms and chronological split
+  -> LSTM temporal model
+  -> Gradient Boosting lag/rolling-feature model
+  -> validation-tuned ensemble and residual blend
+  -> dashboards, evaluation summaries, and model artifacts
+```
 
-Save a CSV at `ml/telemetry.csv` with these columns:
+The LSTM branch learns sequence behavior from lookback windows. The Gradient
+Boosting branch is strong on lag, rolling-window, and abrupt spike features. The
+evaluation layer checks whether the result actually beats simple baselines.
+
+## Repository Layout
+
+```text
+.
+├── runners/                  # Cross-platform and shell-specific entrypoints
+│   ├── run.py                # Primary runner
+│   ├── run.ps1               # Windows PowerShell wrapper
+│   └── run.sh                # Linux/WSL wrapper
+├── ml/                       # Training, data loading, evaluation, dashboards
+├── scripts/                  # Live telemetry collection and cleanup helpers
+├── containerlab/             # ContainerLab topology
+├── configs/                  # FRR router configs
+├── docs/
+│   ├── images/               # Checked-in dashboard evidence
+│   └── results/              # Checked-in evaluation evidence
+├── tests/                    # Pytest coverage
+└── .github/                  # CI and community templates
+```
+
+## Setup
+
+PowerShell:
+
+```powershell
+cd "C:\Users\siddh\Downloads\ai_network_project (1)\ai_network_project"
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+python -m pip install -r requirements.txt
+```
+
+Bash:
+
+```bash
+cd AI-Model-for-Network-Traffic-main
+python -m pip install -r requirements.txt
+```
+
+If ONNX-related installation fails on Windows, install the exporter dependency
+directly:
+
+```powershell
+python -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org onnx onnxscript
+```
+
+## Quick Start
+
+Cross-platform Python runner:
+
+```powershell
+python runners\run.py synthetic --samples 2000 --epochs 40
+```
+
+Windows wrapper:
+
+```powershell
+.\runners\run.ps1 synthetic -Samples 2000 -Epochs 40
+```
+
+Linux/WSL wrapper:
+
+```bash
+bash runners/run.sh synthetic --samples 2000 --epochs 40
+```
+
+Fast smoke run:
+
+```powershell
+.\runners\run.ps1 synthetic -Samples 300 -Epochs 3 -SkipInstall
+```
+
+Universal benchmark on `ml/telemetry.csv`:
+
+```powershell
+.\runners\run.ps1 benchmark -TargetQuality 90 -MaxAttempts 12
+```
+
+## Common Workflows
+
+### Synthetic Trial
+
+```powershell
+.\runners\run.ps1 synthetic -Samples 2000 -Epochs 40
+```
+
+### Kaggle Trial
+
+```powershell
+.\runners\run.ps1 kaggle -Samples 5000 -Epochs 60
+```
+
+### Local CSV Training
+
+Place a CSV at `ml/telemetry.csv` with:
 
 ```text
 timestamp,traffic_mbps,latency_ms,packet_loss_pct
@@ -303,202 +175,111 @@ timestamp,traffic_mbps,latency_ms,packet_loss_pct
 Then run:
 
 ```powershell
-.\run.ps1 train -Epochs 80
+.\runners\run.ps1 train -Epochs 80
 ```
 
-Manual equivalent:
+### Manual End-To-End Trial
 
 ```powershell
-python ml\enhanced_train.py --data ml\telemetry.csv --output-dir runs\hybrid_manual --epochs 80
-python ml\visualize.py --data runs\hybrid_manual\raw_data\telemetry.csv --output-dir runs\hybrid_manual --sensitivity 1.3
-python ml\evaluate_model.py --run-dir runs\hybrid_manual
-python ml\export_model_report.py --run-dir runs\hybrid_manual
+python ml\enhanced_train.py --data ml\telemetry.csv --output-dir runs\sample_hybrid_trial --epochs 40 --device auto
+python ml\visualize.py --data runs\sample_hybrid_trial\raw_data\telemetry.csv --output-dir runs\sample_hybrid_trial --sensitivity 1.3
+python ml\evaluate_model.py --run-dir runs\sample_hybrid_trial
+python ml\export_model_report.py --run-dir runs\sample_hybrid_trial
 ```
 
-## Outputs
-
-Each complete run contains:
-
-- `raw_data/telemetry.csv`
-- `results/predictions.csv`
-- `results/actuals.csv`
-- `results/prediction_intervals.csv`
-- `results/train_losses.csv`
-- `results/evaluation_comparison.csv`
-- `results/evaluation_baselines.csv`
-- `results/evaluation_spikes.csv`
-- `json/metrics.json`
-- `json/spike_summary.json`
-- `json/scaler_params.json`
-- `json/evaluation_summary.json`
-- `json/model_metadata.json`
-- `json/model_readable_summary.json`
-- `images/traffic_prediction_dashboard.png`
-- `images/model_evaluation_dashboard.png`
-- `model/lstm_model.pth`
-- `model/lstm_model.onnx` if `--export-onnx` was used
-- `model/gb_model.joblib`
-- `model/model_readable_report.md`
-- `model/model_weights_summary.csv`
-- `model/model_gate_summary.csv`
-
-Binary files such as `.pth`, `.onnx`, and `.joblib` are not meant to be read in
-a text editor. Use the JSON, CSV, dashboard PNGs, and Markdown report for
-inspection.
-
-## Model Notes
-
-The hybrid trainer uses:
-
-- LSTM lookback sequence length: `96`
-- LSTM hidden size: `128`
-- LSTM layers: `2`
-- Batch size: `32`
-- Temporal attention: additive attention over LSTM time steps
-- Stability: residual final-state connection plus `LayerNorm`
-- LSTM epochs: controlled by `-Epochs` or `--epochs`
-- Chronological split: `--train-ratio 0.70`, validation until `--test-ratio 0.82`, test after that
-- Early stopping: validation-loss patience coordinated with the LR scheduler
-- Learning-rate scheduler: `ReduceLROnPlateau`, factor `0.5`, patience `8`, min LR `1e-5`
-- Gradient Boosting estimators: `500`
-- Gradient Boosting learning rate: `0.04`
-- Gradient Boosting max depth: `4`
-- Gradient Boosting subsample: `0.85`
-- Ensemble weights: validation-tuned per feature from a `0.65` Gradient Boosting, `0.35` LSTM starting point
-- Residual baseline: validation-tuned one-step persistence blend per feature
-- Packet loss transform: `log1p` during neural training, `expm1` after neural prediction
-- GPU support: automatic CUDA use when available, or explicit `--device cpu` / `--device cuda`
-- Uncertainty output: residual-normal 95% intervals in `results/prediction_intervals.csv`
-
-The dashboard spike thresholds are computed as:
-
-```text
-training mean + sensitivity * training standard deviation
-```
-
-Change sensitivity when visualizing:
+### Dataset-Optimized Tree Model
 
 ```powershell
-python ml\visualize.py --data runs\hybrid_manual\raw_data\telemetry.csv --output-dir runs\hybrid_manual --sensitivity 1.3
+.\runners\run.ps1 dataset_opt -SkipInstall
 ```
 
-## Baseline Comparison
-
-Use the ablation runner before claiming an architecture improvement. It trains
-the same split across LSTM, GRU, mean-pooling LSTM, and attention-LSTM variants,
-then writes MSE, MAE, SMAPE, spike F1, and epoch counts.
+### Sequence Model Ablation
 
 ```powershell
 python ml\compare_sequence_models.py --data ml\telemetry.csv --output-dir runs\sequence_comparison --epochs 40
 ```
 
-Outputs:
+This compares LSTM, GRU, mean-pooling LSTM, and attention-LSTM variants on the
+same chronological split.
 
-- `results/sequence_model_comparison.csv`
-- `json/sequence_model_comparison.json`
+### Live ContainerLab Workflow
 
-## Universal Benchmark Mode
+ContainerLab is Linux-focused. Use Linux, WSL2, or a Linux VM with Docker and
+ContainerLab installed.
 
-`ml/auto_benchmark.py` profiles a telemetry CSV, chooses candidate trainers,
-trains, calibrates predictions on validation-only data, evaluates gates, and
-retries with adaptive candidates when a gate fails. It preserves chronological
-splits and does not fit scalers on validation or test rows.
-
-Manual command for any compatible CSV:
+PowerShell:
 
 ```powershell
-python ml\auto_benchmark.py --data ml\telemetry.csv --output-dir runs\auto_generic --target-quality 90 --max-attempts 12 --sync-docs --docs-prefix generic_
+.\runners\run.ps1 deploy
+.\runners\run.ps1 live -Samples 120 -Interval 10 -Epochs 80
+.\runners\run.ps1 destroy
 ```
 
-The loop writes:
-
-- `profile.json`
-- `benchmark_log.jsonl`
-- `best_run.txt`
-- `json/benchmark_diagnosis.json` in the best run when the target is not met
-
-Runner shortcuts:
-
-```powershell
-.\run.ps1 benchmark -TargetQuality 90 -MaxAttempts 12
-.\run.ps1 synthetic -Samples 2000 -AutoBenchmark $true
-.\run.ps1 kaggle -Samples 8000 -AutoBenchmark $true
-```
-
-The benchmark target is aspirational for difficult external telemetry. If the
-loop cannot pass all gates within the attempt limit, it keeps the best measured
-run and records the bottleneck instead of rewriting metrics.
-
-## Self-Learning Benchmark
-
-The benchmark loop now has a self-learning layer enabled by default. Each
-attempt is appended to `runs/.experience/memory.jsonl`, and
-`runs/.experience/policy.json` summarizes which candidates work best for similar
-telemetry profiles. Future runs use that policy to rank candidates before
-falling back to rule-based retry logic.
-
-Useful commands:
-
-```powershell
-python ml\self_improve.py --data ml\telemetry.csv --output-dir runs\self_learning --target-quality 90 --max-rounds 5
-python ml\experience_store.py --rebuild-policy
-.\run.ps1 benchmark -Learn $true -TargetQuality 90 -MaxAttempts 12
-```
-
-The memory is append-only for auditability. It improves candidate selection
-across sessions, but it does not weaken gates or use test labels for training,
-calibration, or policy ranking.
-
-## Kaggle And Dataset Modes
-
-Standard Kaggle hybrid run:
-
-```powershell
-.\run.ps1 kaggle -Samples 5000 -Epochs 60
-```
-
-Dataset-optimized Gradient Boosting-only run:
-
-```powershell
-.\run.ps1 kaggle_opt -Samples 5000 -SkipInstall
-```
-
-For an arbitrary local CSV:
-
-```powershell
-.\run.ps1 dataset_opt -SkipInstall
-```
-
-`dataset_opt` expects `ml/telemetry.csv` to exist.
-
-## Live ContainerLab Workflow
-
-ContainerLab is Linux-focused. On Windows, use WSL2, a Linux VM, or a Linux host
-with Docker and ContainerLab installed.
-
-From PowerShell:
-
-```powershell
-.\run.ps1 deploy
-.\run.ps1 live -Samples 120 -Interval 10 -Epochs 80
-.\run.ps1 destroy
-```
-
-From Linux or WSL:
+Bash:
 
 ```bash
-bash run.sh deploy
-bash run.sh live --samples 120 --interval 10 --epochs 80
-bash run.sh destroy
+bash runners/run.sh deploy
+bash runners/run.sh live --samples 120 --interval 10 --epochs 80
+bash runners/run.sh destroy
 ```
 
-The live collector:
+## Run Outputs
 
-1. Checks for running `clab-ai-traffic-lab-*` containers.
-2. Reads interface byte counters from `/proc/net/dev`.
-3. Sends ping probes to create measurable traffic.
-4. Measures latency and packet loss.
-5. Writes run-ready telemetry into `runs/<timestamp>_live/raw_data/telemetry.csv`.
+Each complete run is written under `runs/` and usually contains:
+
+```text
+raw_data/telemetry.csv
+results/predictions.csv
+results/actuals.csv
+results/prediction_intervals.csv
+results/train_losses.csv
+results/evaluation_comparison.csv
+results/evaluation_baselines.csv
+results/evaluation_spikes.csv
+json/metrics.json
+json/evaluation_summary.json
+json/model_metadata.json
+json/model_readable_summary.json
+images/traffic_prediction_dashboard.png
+images/model_evaluation_dashboard.png
+model/lstm_model.pth
+model/gb_model.joblib
+model/model_readable_report.md
+```
+
+The `runs/` directory is ignored by git because it can contain large generated
+models and experiment artifacts. The curated evidence copied into `docs/` is
+tracked.
+
+## Model Notes
+
+The current hybrid trainer uses:
+
+- Additive temporal attention over LSTM time steps.
+- LayerNorm and a residual final-state connection.
+- Gradient Boosting over lag and rolling-window features.
+- Validation-tuned per-feature ensemble weights.
+- Optional ONNX export for the LSTM component.
+- Residual-normal 95% forecast bands.
+- Automatic CUDA use when PyTorch detects a GPU.
+
+Important limitations:
+
+- The attention model is not a Transformer or Temporal Fusion Transformer.
+- Prediction intervals are approximate, not full probabilistic forecasts.
+- Synthetic performance does not guarantee live-network performance.
+- External data quality, spike frequency, and split behavior can change results
+  substantially.
+
+## Testing
+
+```powershell
+python -m compileall ml scripts runners
+python -m pytest
+```
+
+CI also compiles the ML scripts, runs tests, and executes an auto-benchmark
+smoke check.
 
 ## Troubleshooting
 
@@ -514,23 +295,18 @@ If ONNX export fails with `ModuleNotFoundError: No module named 'onnxscript'`:
 python -m pip install onnx onnxscript
 ```
 
-ONNX export is optional in the enhanced trainer. Use it when needed:
-
-```powershell
-python ml\enhanced_train.py --data ml\telemetry.csv --output-dir runs\onnx_trial --export-onnx
-```
-
-If pip has certificate errors:
-
-```powershell
-python -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org onnx onnxscript
-```
-
-If a run fails after training but before dashboards, rerun the last steps on the
-same run folder:
+If a run fails after training but before dashboards, rerun the final steps:
 
 ```powershell
 python ml\visualize.py --data runs\<run_folder>\raw_data\telemetry.csv --output-dir runs\<run_folder>
 python ml\evaluate_model.py --run-dir runs\<run_folder>
 python ml\export_model_report.py --run-dir runs\<run_folder>
 ```
+
+## Community
+
+- See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow.
+- See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
+- See [SECURITY.md](SECURITY.md) for vulnerability reporting.
+- See [SUPPORT.md](SUPPORT.md) for help and support channels.
+- This project is released under the [MIT License](LICENSE).

@@ -1,9 +1,11 @@
 __pycache__/
 *.pyc
 *.npy
+.pytest_cache/
 .venv/
 .venv-kaggle/
 .pytest_deps/
+.sixth/
 venv/
 
 CODEX_SELF_LEARNING_PLAN.md
