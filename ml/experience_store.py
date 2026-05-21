@@ -71,12 +71,13 @@ def similar_records(fp: str, limit: int = 50, memory_path: Path = MEMORY_PATH) -
 
 
 def update_policy(records: list[ExperienceRecord], policy_path: Path = POLICY_PATH) -> dict:
-    policy = {"version": 1, "global_candidate_scores": {}, "by_fingerprint": {}, "by_volatility": {}}
+    policy = {"version": 1, "global_candidate_scores": {}, "candidate_attempts": {}, "by_fingerprint": {}, "by_volatility": {}}
     grouped: dict[str, list[ExperienceRecord]] = {}
     for record in records:
         grouped.setdefault(record.candidate_id, []).append(record)
     for candidate, items in grouped.items():
         policy["global_candidate_scores"][candidate] = sum(item.quality_pct for item in items) / len(items)
+        policy["candidate_attempts"][candidate] = len(items)
     by_fp: dict[str, list[ExperienceRecord]] = {}
     by_vol: dict[str, list[ExperienceRecord]] = {}
     for record in records:

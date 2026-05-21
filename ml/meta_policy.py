@@ -16,6 +16,7 @@ def rank_candidates(profile: TelemetryProfile, policy: dict, attempts: list) -> 
         return [candidate for candidate in candidates if candidate.id not in tried]
     fp = fingerprint(profile)
     global_scores = policy.get("global_candidate_scores", {})
+    attempts_by_candidate = policy.get("candidate_attempts", {})
     fp_policy = policy.get("by_fingerprint", {}).get(fp, {})
     vol_policy = policy.get("by_volatility", {}).get(profile.volatility, {})
     total = max(1, sum(int(row.get("count", 1)) for row in policy.get("by_fingerprint", {}).values()))
@@ -32,8 +33,8 @@ def rank_candidates(profile: TelemetryProfile, policy: dict, attempts: list) -> 
             historical = max(historical, float(vol_policy.get("mean_quality", historical)))
         global_score = float(global_scores.get(candidate.id, 50.0))
         rule_priority = 100.0 - base_order[candidate.id] * 10.0
-        count = max(1, sum(1 for item in global_scores if item == candidate.id))
-        exploration = math.sqrt(2.0 * math.log(total + 1.0) / count) * 5.0
+        count = int(attempts_by_candidate.get(candidate.id, 0))
+        exploration = math.sqrt(2.0 * math.log(total + 1.0) / (count + 1.0)) * 5.0
         score = 0.45 * historical + 0.25 * global_score + 0.20 * rule_priority + 0.10 * exploration
         ranked.append((score, candidate))
     ranked.sort(key=lambda item: item[0], reverse=True)

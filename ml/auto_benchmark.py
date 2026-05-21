@@ -88,7 +88,7 @@ def sync_docs(run_dir: Path, prefix: str) -> None:
                 shutil.copy2(src, docs_results / f"{prefix}{name}")
 
 
-def run_benchmark(data: Path, output_dir: Path, target_quality: float = 90.0, max_attempts: int = 12, max_minutes: int = 45, sync_prefix: str = "", learn: bool = True) -> BenchmarkResult:
+def run_benchmark(data: Path, output_dir: Path, target_quality: float = 90.0, max_attempts: int = 24, max_minutes: int = 45, sync_prefix: str = "", learn: bool = True) -> BenchmarkResult:
     if learn:
         from self_improve import self_improve_benchmark
 
@@ -141,7 +141,7 @@ def main() -> None:
     parser.add_argument("--data", required=True)
     parser.add_argument("--output-dir", default="runs/auto_telemetry")
     parser.add_argument("--target-quality", type=float, default=90.0)
-    parser.add_argument("--max-attempts", type=int, default=12)
+    parser.add_argument("--max-attempts", type=int, default=24)
     parser.add_argument("--max-minutes", type=int, default=45)
     parser.add_argument("--sync-docs", action="store_true")
     parser.add_argument("--docs-prefix", default="generic_")

@@ -11,7 +11,7 @@ EPOCHS=130
 SKIP_INSTALL=0
 L_IPN=""
 TARGET_QUALITY=90
-MAX_ATTEMPTS=12
+MAX_ATTEMPTS=24
 LEARN=1
 
 usage() {
@@ -35,7 +35,7 @@ Options:
   --epochs N         Training epochs (default: 130)
   --l-ipn N          Optional Kaggle local workstation id
   --target-quality N Benchmark target quality (default: 90)
-  --max-attempts N   Benchmark retry limit (default: 12)
+  --max-attempts N   Benchmark retry limit (default: 24)
   --no-learn         Disable self-learning wrapper
   --skip-install     Do not install Python dependencies
 EOF

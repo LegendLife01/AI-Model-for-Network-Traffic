@@ -208,9 +208,10 @@ def main() -> None:
 
     x = modeled_df[feature_cols].to_numpy(dtype=float)
     y = modeled_df[FEATURES].to_numpy(dtype=float)
-    split = max(1, min(len(x) - 1, int(len(x) * args.train_split)))
-    x_train, x_test = x[:split], x[split:]
-    y_train, y_test = y[:split], y[split:]
+    split = max(2, min(len(x) - 1, int(len(x) * args.train_split)))
+    val_start = max(1, min(split - 1, int(split * 0.85)))
+    x_train, x_val, x_test = x[:val_start], x[val_start:split], x[split:]
+    y_train, y_val, y_test = y[:val_start], y[val_start:split], y[split:]
 
     thresholds = spike_thresholds(y_train, args.spike_std)
     spikes = spike_mask(y_train, thresholds)
@@ -224,9 +225,11 @@ def main() -> None:
 
     scaler = StandardScaler()
     x_train_scaled = scaler.fit_transform(x_train_aug)
+    x_val_scaled = scaler.transform(x_val)
     x_test_scaled = scaler.transform(x_test)
     model = make_model(args.model, args.seed)
     model.fit(x_train_scaled, y_train_aug)
+    val_predictions = np.clip(model.predict(x_val_scaled), 0.0, None)
     loss_df, best_predictions, best_stage = staged_loss_curve(model, x_test_scaled, y_test)
     predictions = np.clip(best_predictions, 0.0, None)
 
@@ -240,6 +243,7 @@ def main() -> None:
             "feature_count": len(feature_cols),
             "train_samples": int(len(x_train_aug)),
             "base_train_samples": int(len(x_train)),
+            "validation_samples": int(len(x_val)),
             "test_samples": int(len(x_test)),
             "estimators_per_target": estimator_count(model),
             "best_stage": best_stage,
@@ -248,7 +252,7 @@ def main() -> None:
     }
     print(f"Loaded {len(raw_df)} rows from {data_path}")
     print(f"Feature rows after lookback: {len(modeled_df)}")
-    print(f"Training samples: {len(x_train_aug)} | Test samples: {len(x_test)}")
+    print(f"Training samples: {len(x_train_aug)} | Validation samples: {len(x_val)} | Test samples: {len(x_test)}")
     print("\nTest performance:")
     print(f"{'feature':<18} {'MAE':>10} {'RMSE':>10}")
     for idx, feature in enumerate(FEATURES):
@@ -271,6 +275,8 @@ def main() -> None:
     joblib.dump(model_payload, model_path)
     pd.DataFrame(predictions, columns=FEATURES).to_csv(artifact_path(output_dir, "predictions.csv", "results"), index=False)
     pd.DataFrame(y_test, columns=FEATURES).to_csv(artifact_path(output_dir, "actuals.csv", "results"), index=False)
+    pd.DataFrame(val_predictions, columns=FEATURES).to_csv(artifact_path(output_dir, "val_predictions.csv", "results"), index=False)
+    pd.DataFrame(y_val, columns=FEATURES).to_csv(artifact_path(output_dir, "val_actuals.csv", "results"), index=False)
     loss_df.to_csv(
         artifact_path(output_dir, "train_losses.csv", "results"),
         index=False,

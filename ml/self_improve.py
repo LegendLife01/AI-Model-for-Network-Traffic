@@ -16,22 +16,21 @@ from telemetry_profile import profile_telemetry
 from trainer_tournament import next_candidate
 
 
-def traffic_f1(summary: dict) -> float:
-    for row in summary.get("per_feature", []):
-        if row.get("metric") == "traffic_mbps":
-            return 0.0
+def traffic_f1_from_run(run_dir: Path) -> float:
+    spikes_path = run_dir / "results" / "evaluation_spikes.csv"
+    if not spikes_path.exists():
+        return 0.0
+    import csv
+
+    for row in csv.DictReader(spikes_path.open(encoding="utf-8")):
+        if row["metric"] == "traffic_mbps":
+            return float(row["f1"])
     return 0.0
 
 
 def append_experience(profile, candidate, summary: dict, run_dir: Path, status: str) -> None:
     spikes_path = run_dir / "results" / "evaluation_spikes.csv"
-    traffic = 0.0
-    if spikes_path.exists():
-        import csv
-
-        for row in csv.DictReader(spikes_path.open(encoding="utf-8")):
-            if row["metric"] == "traffic_mbps":
-                traffic = float(row["f1"])
+    traffic = traffic_f1_from_run(run_dir)
     record = ExperienceRecord(
         timestamp=utc_now(),
         data_fingerprint=fingerprint(profile),

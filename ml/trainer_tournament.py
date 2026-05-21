@@ -32,17 +32,16 @@ def candidates_for_profile(profile: TelemetryProfile) -> list[Candidate]:
         Candidate("gb_spike", "gb", ["--lookback", lookback, "--spike-oversample", "4"]),
         Candidate("hybrid_short_seq", "enhanced", ["--epochs", epochs, "--sequence-length", "48", "--spike-quantile", q]),
         Candidate("hybrid_gb_heavy", "enhanced", ["--epochs", epochs, "--sequence-length", seq, "--gb-weight", "0.85", "--lstm-weight", "0.15"]),
-        Candidate("hybrid_delta_traffic", "enhanced", ["--epochs", epochs, "--sequence-length", seq, "--predict-traffic-delta"]),
         Candidate("gb_spike_deep", "gb", ["--lookback", "36", "--spike-oversample", "6"]),
         Candidate("hybrid_low_quantile", "enhanced", ["--epochs", str(profile.recommended_epochs + 20), "--sequence-length", seq, "--spike-quantile", "0.82", "--spike-weight", "10"]),
     ]
     preferred = profile.recommended_trainer
     if preferred == "gb_only":
-        order = ["gb_spike", "gb_spike_deep", "hybrid_short_seq", "hybrid_default", "hybrid_aggressive", "hybrid_gb_heavy", "hybrid_low_quantile", "hybrid_delta_traffic"]
+        order = ["gb_spike_deep", "gb_spike", "hybrid_short_seq", "hybrid_default", "hybrid_aggressive", "hybrid_gb_heavy", "hybrid_low_quantile"]
     elif preferred == "hybrid_aggressive":
-        order = ["hybrid_aggressive", "hybrid_low_quantile", "hybrid_gb_heavy", "hybrid_default", "gb_spike", "gb_spike_deep", "hybrid_short_seq", "hybrid_delta_traffic"]
+        order = ["hybrid_aggressive", "hybrid_low_quantile", "hybrid_gb_heavy", "hybrid_default", "gb_spike", "gb_spike_deep", "hybrid_short_seq"]
     else:
-        order = ["hybrid_default", "hybrid_aggressive", "hybrid_gb_heavy", "hybrid_delta_traffic", "gb_spike", "gb_spike_deep", "hybrid_short_seq", "hybrid_low_quantile"]
+        order = ["hybrid_default", "hybrid_aggressive", "hybrid_gb_heavy", "gb_spike", "gb_spike_deep", "hybrid_short_seq", "hybrid_low_quantile"]
     lookup = {candidate.id: candidate for candidate in base}
     return [lookup[item] for item in order]
 

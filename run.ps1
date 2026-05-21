@@ -6,7 +6,7 @@ param(
     [int]$Epochs = 130,
     [int]$LIpn = -1,
     [double]$TargetQuality = 90,
-    [int]$MaxAttempts = 12,
+    [int]$MaxAttempts = 24,
     [bool]$AutoBenchmark = $true,
     [bool]$Learn = $true,
     [switch]$SkipInstall
