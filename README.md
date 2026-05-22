@@ -1,16 +1,18 @@
 # NetFlow-Forecaster
 
-AI-powered network telemetry forecasting for traffic, latency, and packet loss.
+Applied network telemetry forecasting for traffic, latency, and packet loss.
 
-NetFlow-Forecaster turns telemetry CSVs, synthetic trials, Kaggle flow data, and
-live ContainerLab samples into reproducible forecasting runs with dashboards,
-baseline comparisons, spike metrics, and model artifacts.
+NetFlow-Forecaster is a practical ML pipeline that turns telemetry CSVs,
+synthetic trials, Kaggle flow data, and live ContainerLab samples into
+reproducible forecasting runs with dashboards, baseline comparisons, spike
+metrics, and model artifacts.
 
 ## Highlights
 
 - Forecasts `traffic_mbps`, `latency_ms`, and `packet_loss_pct` together.
 - Uses chronological time-series splits and train-only scaling.
-- Trains a hybrid attention-LSTM plus Gradient Boosting ensemble.
+- Combines an LSTM-based sequence model with Gradient Boosting over lag and
+  rolling-window features.
 - Compares results against persistence and moving-average baselines.
 - Tracks spike precision, recall, and F1 instead of only aggregate loss.
 - Produces dashboards, JSON summaries, CSV reports, model files, and readable
@@ -65,15 +67,16 @@ The pipeline then follows this flow:
 ```text
 telemetry CSV
   -> feature transforms and chronological split
-  -> LSTM temporal model
-  -> Gradient Boosting lag/rolling-feature model
-  -> validation-tuned ensemble and residual blend
+  -> LSTM-based sequence model
+  -> Gradient Boosting model over lag and rolling features
+  -> validation-tuned blend and residual baseline check
   -> dashboards, evaluation summaries, and model artifacts
 ```
 
-The LSTM branch learns sequence behavior from lookback windows. The Gradient
-Boosting branch is strong on lag, rolling-window, and abrupt spike features. The
-evaluation layer checks whether the result actually beats simple baselines.
+The LSTM component learns recent sequence behavior from lookback windows. The
+Gradient Boosting component handles tabular lag, rolling-window, and abrupt
+spike features. The evaluation layer checks whether the result actually beats
+simple baselines.
 
 ## Repository Layout
 
@@ -199,8 +202,8 @@ python ml\export_model_report.py --run-dir runs\sample_hybrid_trial
 python ml\compare_sequence_models.py --data ml\telemetry.csv --output-dir runs\sequence_comparison --epochs 40
 ```
 
-This compares LSTM, GRU, mean-pooling LSTM, and attention-LSTM variants on the
-same chronological split.
+This compares LSTM, GRU, mean-pooling LSTM, and LSTM-with-attention variants on
+the same chronological split.
 
 ### Live ContainerLab Workflow
 
@@ -253,9 +256,9 @@ tracked.
 
 ## Model Notes
 
-The current hybrid trainer uses:
+The current trainer uses:
 
-- Additive temporal attention over LSTM time steps.
+- A small additive attention layer over LSTM time steps.
 - LayerNorm and a residual final-state connection.
 - Gradient Boosting over lag and rolling-window features.
 - Validation-tuned per-feature ensemble weights.
@@ -265,7 +268,11 @@ The current hybrid trainer uses:
 
 Important limitations:
 
+- This is not a foundation model, transformer forecaster, or autonomous network
+  controller.
 - The attention model is not a Transformer or Temporal Fusion Transformer.
+- The neural component is still an LSTM-based forecasting model with practical
+  tabular augmentation.
 - Prediction intervals are approximate, not full probabilistic forecasts.
 - Synthetic performance does not guarantee live-network performance.
 - External data quality, spike frequency, and split behavior can change results
