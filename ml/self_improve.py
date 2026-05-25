@@ -63,8 +63,28 @@ def self_improve_benchmark(
     attempts: list[dict] = []
     best_summary: dict | None = None
     best_run: Path | None = None
-    for round_idx in range(max_rounds):
-        for _ in range(attempts_per_round):
+    log_path = output_dir / "benchmark_log.jsonl"
+    if log_path.exists():
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            attempts.append(record)
+            summary = record.get("summary", {})
+            quality = float(summary.get("overall", {}).get("normalized_quality_pct", 0.0))
+            best_quality = (
+                -1.0
+                if best_summary is None
+                else float(best_summary.get("overall", {}).get("normalized_quality_pct", 0.0))
+            )
+            if quality > best_quality:
+                best_summary = summary
+                best_run = Path(record["run_dir"])
+
+    start_round = len(attempts) // attempts_per_round
+    for round_idx in range(start_round, max_rounds):
+        target_attempt_count = (round_idx + 1) * attempts_per_round
+        while len(attempts) < target_attempt_count:
             candidate = next_candidate(profile, attempts)
             run_dir = output_dir / f"round_{round_idx:02d}_attempt_{len(attempts):02d}_{candidate.id}"
             try:

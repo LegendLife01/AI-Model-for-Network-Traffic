@@ -14,17 +14,25 @@ import pandas as pd
 from metrics_utils import FEATURES, weighted_mae
 
 
-def load_pair(run_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+def load_pair(run_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     val_p = run_dir / "results" / "val_predictions.csv"
     val_a = run_dir / "results" / "val_actuals.csv"
     test_p = run_dir / "results" / "predictions.csv"
-    if not (val_p.exists() and val_a.exists() and test_p.exists()):
+    test_a = run_dir / "results" / "actuals.csv"
+    if not (val_p.exists() and val_a.exists() and test_p.exists() and test_a.exists()):
         return None
     return (
         pd.read_csv(val_p)[FEATURES].to_numpy(dtype=float),
         pd.read_csv(val_a)[FEATURES].to_numpy(dtype=float),
         pd.read_csv(test_p)[FEATURES].to_numpy(dtype=float),
+        pd.read_csv(test_a)[FEATURES].to_numpy(dtype=float),
     )
+
+
+def align_tail(*arrays: np.ndarray) -> list[np.ndarray]:
+    """Align forecast arrays by their most recent samples."""
+    min_len = min(len(array) for array in arrays)
+    return [array[-min_len:] for array in arrays]
 
 
 def stack_attempts(run_dirs: list[Path], output_dir: Path) -> Path | None:
@@ -33,11 +41,13 @@ def stack_attempts(run_dirs: list[Path], output_dir: Path) -> Path | None:
     if len(pairs) < 2:
         return None
     scored = []
-    for run_dir, (val_pred, val_actual, _) in pairs:
+    for run_dir, (val_pred, val_actual, _, _) in pairs:
+        val_pred, val_actual = align_tail(val_pred, val_actual)
         scored.append((weighted_mae(val_actual, val_pred), run_dir, val_pred, val_actual))
     scored.sort(key=lambda item: item[0])
     _, run_a, pred_a, actual = scored[0]
-    _, run_b, pred_b, _ = scored[1]
+    _, run_b, pred_b, actual_b = scored[1]
+    pred_a, actual, pred_b, actual_b = align_tail(pred_a, actual, pred_b, actual_b)
     best_w = 0.5
     best_score = float("inf")
     for weight in np.linspace(0.0, 1.0, 21):
@@ -49,8 +59,11 @@ def stack_attempts(run_dirs: list[Path], output_dir: Path) -> Path | None:
     shutil.copytree(run_a, output_dir, dirs_exist_ok=True)
     test_a = pd.read_csv(run_a / "results" / "predictions.csv")[FEATURES].to_numpy(dtype=float)
     test_b = pd.read_csv(run_b / "results" / "predictions.csv")[FEATURES].to_numpy(dtype=float)
+    actual_a = pd.read_csv(run_a / "results" / "actuals.csv")[FEATURES].to_numpy(dtype=float)
+    test_a, test_b, actual_a = align_tail(test_a, test_b, actual_a)
     final = best_w * test_a + (1.0 - best_w) * test_b
     pd.DataFrame(final, columns=FEATURES).to_csv(output_dir / "results" / "predictions.csv", index=False)
+    pd.DataFrame(actual_a, columns=FEATURES).to_csv(output_dir / "results" / "actuals.csv", index=False)
     (output_dir / "json" / "stacking.json").write_text(
         f'{{"run_a":"{run_a}","run_b":"{run_b}","weight_a":{best_w:.3f}}}',
         encoding="utf-8",
