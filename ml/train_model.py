@@ -49,16 +49,50 @@ class MultivariateTrafficLSTM(nn.Module):
 
 
 class SpikeWeightedLoss(nn.Module):
-    def __init__(self, thresholds: torch.Tensor, spike_weight: float = 4.0, focal_gamma: float = 0.0):
+    """MSE with extra penalty on spike timesteps.
+
+    Adds a ``per_feature_spike_multipliers`` parameter (default [1.0, 1.8, 2.5])
+    that scales spike penalties independently per feature. Traffic spikes keep
+    weight 1.0x; latency spikes get 1.8x; packet-loss spikes get 2.5x.
+
+    Rationale: traffic carries 0.5 weight in the quality score so the optimizer
+    already prioritises it. The multipliers correct for that imbalance so
+    latency and loss spike recall improve without hurting traffic.
+    """
+
+    def __init__(
+        self,
+        thresholds: torch.Tensor,
+        spike_weight: float = 4.0,
+        focal_gamma: float = 0.0,
+        per_feature_spike_multipliers: torch.Tensor | None = None,
+    ):
         super().__init__()
         self.register_buffer("thresholds", thresholds)
         self.spike_weight = spike_weight
         self.focal_gamma = focal_gamma
+        if per_feature_spike_multipliers is None:
+            per_feature_spike_multipliers = torch.tensor(
+                [1.0, 1.8, 2.5], dtype=torch.float32
+            )
+        self.register_buffer(
+            "per_feature_spike_multipliers", per_feature_spike_multipliers
+        )
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         error = (pred - target).abs()
-        focal = 1.0 if self.focal_gamma <= 0 else 1.0 + error.pow(self.focal_gamma)
-        spike_weights = 1.0 + self.spike_weight * (target > self.thresholds).float()
+        focal = (
+            1.0
+            if self.focal_gamma <= 0
+            else 1.0 + error.pow(self.focal_gamma)
+        )
+        spike_mask = (target > self.thresholds).float()
+        spike_weights = (
+            1.0
+            + self.spike_weight
+            * spike_mask
+            * self.per_feature_spike_multipliers
+        )
         return (spike_weights * focal * (pred - target) ** 2).mean()
 
 
@@ -102,12 +136,18 @@ def load_dataset(path: Path) -> pd.DataFrame:
 
 
 def transform_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply per-feature transformations before scaling.
+
+    packet_loss_pct uses log1p so large loss spikes remain learnable while
+    keeping the training target numerically stable.
+    """
     transformed = df.copy()
     transformed["packet_loss_pct"] = np.log1p(transformed["packet_loss_pct"])
     return transformed
 
 
 def inverse_transform_features(values: np.ndarray) -> np.ndarray:
+    """Invert transform_features for packet_loss_pct."""
     restored = values.copy()
     loss_idx = FEATURES.index("packet_loss_pct")
     restored[:, loss_idx] = np.expm1(restored[:, loss_idx])

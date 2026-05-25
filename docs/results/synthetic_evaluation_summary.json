@@ -1,7 +1,7 @@
 {
   "overall": {
-    "normalized_quality_pct": 83.6468232180014,
-    "mae_improvement_vs_persistence_pct": 25.21093394088099,
+    "normalized_quality_pct": 83.68848587386502,
+    "mae_improvement_vs_persistence_pct": 25.40422200507558,
     "final_training_loss": 11.966737180948256,
     "epochs": 59,
     "rows": 2000,
@@ -11,13 +11,13 @@
     {
       "metric": "traffic_mbps",
       "unit": "Mbps",
-      "model_mae": 8.400845575047038,
+      "model_mae": 8.32797472953064,
       "baseline_mae": 12.521618075801747,
-      "mae_improvement_pct": 32.909265206851956,
-      "model_rmse": 16.537549922868738,
+      "mae_improvement_pct": 33.49122550204114,
+      "model_rmse": 16.458859809254395,
       "baseline_rmse": 23.911960991229144,
-      "model_r2": 0.7582816252994977,
-      "quality_pct": 89.88590523669271
+      "model_r2": 0.7605764746941323,
+      "quality_pct": 89.96925556084602
     },
     {
       "metric": "latency_ms",
@@ -33,13 +33,13 @@
     {
       "metric": "packet_loss_pct",
       "unit": "%",
-      "model_mae": 0.3526361516002259,
+      "model_mae": 0.35264488116480247,
       "baseline_mae": 0.41646647230320705,
-      "mae_improvement_pct": 15.326640905803748,
-      "model_rmse": 0.8556352005299389,
+      "mae_improvement_pct": 15.324544803198341,
+      "model_rmse": 0.8556367068079702,
       "baseline_rmse": 1.0560109384096437,
-      "model_r2": -0.16850871767233278,
-      "quality_pct": 76.45351840564123
+      "model_r2": -0.16851283181013121,
+      "quality_pct": 76.45346838078903
     }
   ],
   "gates_passed": {
@@ -51,8 +51,8 @@
     "model_quality_gt_persistence": true
   },
   "benchmark": {
-    "latency_ms": 42.65537374994892,
-    "throughput_samples_sec": 3000.7942434252677,
+    "latency_ms": 40.87032624956919,
+    "throughput_samples_sec": 3131.856575315428,
     "model_size_mb": 0.9084978103637695,
     "device": "cpu",
     "parameters": 235794,
@@ -61,10 +61,10 @@
   "baseline_comparison": [
     {
       "method": "Model",
-      "mae": 3.2534828941317677,
-      "rmse": 6.57062120337838,
-      "r2": 0.23613831993660597,
-      "quality_pct": 83.6468232180014
+      "mae": 3.2291955221478275,
+      "rmse": 6.544391667599609,
+      "r2": 0.23690189835555134,
+      "quality_pct": 83.68848587386502
     },
     {
       "method": "Persistence",

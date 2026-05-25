@@ -26,7 +26,7 @@ trials. These are useful reproducible demos, not claims of production readiness.
 
 | Dataset | Rows | Quality | MAE vs Persistence | Traffic Spike F1 | Status |
 |---|---:|---:|---:|---:|---|
-| Synthetic | 2000 | 83.6% | +25.2% | 0.851 | Best checked-in demo |
+| Synthetic | 2000 | 83.7% | +25.4% | 0.853 | Best checked-in demo |
 | Generic `ml/telemetry.csv` | 3000 | 81.2% | +18.4% | 0.810 | Local CSV demo |
 | External NetFlow CSV | 120000 | 73.0% | +34.7% | 0.887 | Large CSV trial |
 

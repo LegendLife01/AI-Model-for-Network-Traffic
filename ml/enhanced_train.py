@@ -83,6 +83,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spike-quantile", type=float, default=0.90)
     parser.add_argument("--spike-weight", type=float, default=4.0)
     parser.add_argument("--focal-gamma", type=float, default=0.3)
+    parser.add_argument(
+        "--feature-spike-multipliers",
+        default="1.0,1.0,1.0",
+        help="Comma-separated spike loss multipliers for traffic, latency, packet loss.",
+    )
     parser.add_argument("--train-ratio", type=float, default=0.70, help="Chronological training fraction.")
     parser.add_argument("--test-ratio", type=float, default=0.82, help="Chronological test start fraction; validation is between train and test.")
     parser.add_argument("--train-split", type=float, default=None, help="Deprecated alias for --test-ratio.")
@@ -105,6 +110,15 @@ def parse_args() -> argparse.Namespace:
 def normalized_mse(prediction: np.ndarray, target: np.ndarray) -> float:
     scale = np.maximum(target.std(axis=0, ddof=0), 1e-9)
     return float(np.mean(((prediction - target) / scale) ** 2))
+
+
+def parse_feature_spike_multipliers(value: str) -> torch.Tensor:
+    parts = [float(part.strip()) for part in value.split(",") if part.strip()]
+    if len(parts) != len(FEATURES):
+        raise ValueError(
+            f"--feature-spike-multipliers expects {len(FEATURES)} values, got {len(parts)}"
+        )
+    return torch.tensor(parts, dtype=torch.float32)
 
 
 def original_index_for_sequence(sequence_idx: int, sequence_length: int) -> int:
@@ -247,6 +261,9 @@ def main() -> None:
         torch.tensor(scaled_spike_thresholds, dtype=torch.float32, device=device),
         spike_weight=args.spike_weight,
         focal_gamma=args.focal_gamma,
+        per_feature_spike_multipliers=parse_feature_spike_multipliers(
+            args.feature_spike_multipliers
+        ).to(device),
     )
     mse_criterion = nn.MSELoss()
 

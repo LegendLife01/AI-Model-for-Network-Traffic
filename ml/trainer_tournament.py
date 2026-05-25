@@ -34,14 +34,30 @@ def candidates_for_profile(profile: TelemetryProfile) -> list[Candidate]:
         Candidate("hybrid_gb_heavy", "enhanced", ["--epochs", epochs, "--sequence-length", seq, "--gb-weight", "0.85", "--lstm-weight", "0.15"]),
         Candidate("gb_spike_deep", "gb", ["--lookback", "36", "--spike-oversample", "6"]),
         Candidate("hybrid_low_quantile", "enhanced", ["--epochs", str(profile.recommended_epochs + 20), "--sequence-length", seq, "--spike-quantile", "0.82", "--spike-weight", "10"]),
+        # R2 recovery candidate: short lookback (24h) forces the model to learn
+        # from recent spike context rather than long-range daily patterns.
+        # Combined with high spike_weight=8.0 this specifically targets the
+        # latency and packet_loss spike recall gap.
+        Candidate(
+            "hybrid_r2_recovery",
+            "enhanced",
+            [
+                "--epochs", str(profile.recommended_epochs + 20),
+                "--sequence-length", "24",
+                "--spike-quantile", "0.85",
+                "--spike-weight", "8.0",
+                "--focal-gamma", "0.5",
+                "--feature-spike-multipliers", "1.0,1.8,2.5",
+            ],
+        ),
     ]
     preferred = profile.recommended_trainer
     if preferred == "gb_only":
-        order = ["gb_spike_deep", "gb_spike", "hybrid_short_seq", "hybrid_default", "hybrid_aggressive", "hybrid_gb_heavy", "hybrid_low_quantile"]
+        order = ["gb_spike_deep", "gb_spike", "hybrid_r2_recovery", "hybrid_short_seq", "hybrid_default", "hybrid_aggressive", "hybrid_gb_heavy", "hybrid_low_quantile"]
     elif preferred == "hybrid_aggressive":
-        order = ["hybrid_aggressive", "hybrid_low_quantile", "hybrid_gb_heavy", "hybrid_default", "gb_spike", "gb_spike_deep", "hybrid_short_seq"]
+        order = ["hybrid_aggressive", "hybrid_r2_recovery", "hybrid_low_quantile", "hybrid_gb_heavy", "hybrid_default", "gb_spike", "gb_spike_deep", "hybrid_short_seq"]
     else:
-        order = ["hybrid_default", "hybrid_aggressive", "hybrid_gb_heavy", "gb_spike", "gb_spike_deep", "hybrid_short_seq", "hybrid_low_quantile"]
+        order = ["hybrid_default", "hybrid_r2_recovery", "hybrid_aggressive", "hybrid_gb_heavy", "gb_spike", "gb_spike_deep", "hybrid_short_seq", "hybrid_low_quantile"]
     lookup = {candidate.id: candidate for candidate in base}
     return [lookup[item] for item in order]
 
@@ -71,8 +87,13 @@ def next_candidate(profile: TelemetryProfile, attempts: list[dict]) -> Candidate
     if not gates.get("beats_persistence_each_feature_mae", True):
         traffic = per_feature.get("traffic_mbps", {})
         preferred = "hybrid_gb_heavy" if float(traffic.get("mae_improvement_pct", 0.0)) < 0 else "gb_spike"
-    if not gates.get("quality_ge_90", True) and quality < 75:
-        preferred = "gb_spike"
+    if not gates.get("quality_ge_90", True) and quality < 80:
+        # If below 80% and not hitting traffic spike gate, try the recovery
+        # candidate before falling all the way back to gb_spike.
+        if not gates.get("traffic_spike_f1_ge_0_50", True):
+            preferred = "hybrid_aggressive"
+        else:
+            preferred = "hybrid_r2_recovery"
     if preferred:
         for candidate in candidates:
             if candidate.id == preferred and candidate.id not in tried:
